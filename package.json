@@ -1,0 +1,22 @@
+{
+  "name": "minecraft-telegram-bot",
+  "version": "1.0.0",
+  "description": "Bot for managing Minecraft servers",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js",
+    "client": "node bedrock-client.js",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "bedrock-protocol": "^3.52.0",
+    "minecraft-server-util": "^5.4.4",
+    "pidusage": "^3.0.2",
+    "dotenv": "^16.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
