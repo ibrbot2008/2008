@@ -3,7 +3,7 @@ const { createClient } = require('bedrock-protocol');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-
+import express from 'npm:express@4.18.0';
 // pidusage اختياري (إذا لم يكن مثبتاً لن يتسبب بتوقف البوت)
 let pidusage = null;
 try {
@@ -2037,3 +2037,4 @@ bot.launch({
     console.error('4. أعد التشغيل (Resume Service)');
   }
 });
+
