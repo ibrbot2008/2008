@@ -3,25 +3,39 @@ const { createClient } = require('bedrock-protocol');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-import express from 'npm:express@4.18.0';
-// pidusage اختياري (إذا لم يكن مثبتاً لن يتسبب بتوقف البوت)
-let pidusage = null;
-try {
-  pidusage = require('pidusage');
-} catch (e) {
-  pidusage = null;
+const http = require('http');
+
+// ===== حل مشكلة البورت =====
+let port = 3000;
+const server = http.createServer((req, res) => {
+  res.write('Bot is Running!');
+  res.end();
+});
+
+function startServer(portToTry) {
+  server.listen(portToTry, () => {
+    console.log(`✅ Server running on port ${portToTry}`);
+    port = portToTry;
+  }).on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.log(`⚠️ Port ${portToTry} is busy, trying ${portToTry + 1}`);
+      startServer(portToTry + 1);
+    } else {
+      console.error('❌ Server error:', err.message);
+    }
+  });
 }
 
-// ============== [الإعدادات] ==============
-const REQUIRED_CHANNEL = -1003499194538; // قناة الاشتراك الإجباري
-const botToken = '8198997283:AAHL_yWKazZf3Aa8OluwgjXV2goxtpwNPPQ';// ⚠️ غيّر هذا
-const ownerId = 1421302016; // ⚠️ غيّر هذا
+startServer(3000);
 
-// قنوات الاشتراك (قابلة للإدارة من لوحة الأدمن)
+// ============== [الإعدادات] ==============
+const REQUIRED_CHANNEL = -1003499194538;
+const botToken = '8198997283:AAHL_yWKazZf3Aa8OluwgjXV2goxtpwNPPQ';
+const ownerId = 1421302016;
+
 const DEFAULT_SUB_CHANNELS = [
   { id: REQUIRED_CHANNEL, url: 'https://t.me/+c7sbwOViyhNmYzAy', title: 'IBR Channel' }
 ];
-
 
 const bot = new Telegraf(botToken);
 
@@ -29,36 +43,49 @@ const bot = new Telegraf(botToken);
 let servers = {};
 let users = [];
 let clients = {};
-let userMeta = {};     // معلومات إضافية (آخر المستخدمين...)
-let bannedUsers = [];  // قائمة المحظورين
-let admins = [];       // مسؤولين إضافيين (لو احتجت لاحقاً)
-let subChannels = [];  // قنوات الاشتراك الإجباري
+let userMeta = {};
+let bannedUsers = [];
+let admins = [];
+let subChannels = [];
 let settings = { forceSubscription: true };
 const DATA_DIR = './data';
 
-// ============== [حالات لوحة الأدمن - بدون تغيير نظام البوت الأساسي] ==============
-const pendingBroadcast = new Map();   // ownerId => true
-const pendingUserAction = new Map();  // ownerId => { action: 'ban'|'unban'|'info', promptMsgId?: number }
-const pendingAdminAction = new Map(); // ownerId => { action: 'add'|'remove' }
-const pendingSubAction = new Map();   // ownerId => { action: 'add' }
+// ============== [نظام النقاط الجديد] ==============
+let pointsSystem = {
+  points: {}, // userId: { balance: 100, totalEarned: 100, lastBonus: null }
+  bonusLinks: {}, // referralCode: { points: 100, uses: 0, maxUses: 1, expiry: null }
+  activeBots: {}, // userId: { startTime: timestamp, hours: 6, botCount: 1 }
+  timers: {}, // userId: timerId
+  linkCooldowns: {} // userId: { link1: timestamp, link2: timestamp }
+};
 
-// ============== [خريطة الإصدارات الذكية - محدثة] ==============
+// ============== [روابط المكافآت الافتراضية - كل رابط يستخدم مرة واحدة فقط] ==============
+const DEFAULT_BONUS_LINKS = {
+  'bonus_100_1': { points: 100, uses: 0, maxUses: 1, expiry: null, creator: 'system' },
+  'bonus_100_2': { points: 100, uses: 0, maxUses: 1, expiry: null, creator: 'system' },
+  'bonus_100_3': { points: 100, uses: 0, maxUses: 1, expiry: null, creator: 'system' },
+  'bonus_100_4': { points: 100, uses: 0, maxUses: 1, expiry: null, creator: 'system' },
+  'bonus_100_5': { points: 100, uses: 0, maxUses: 1, expiry: null, creator: 'system' }
+};
+
+// ============== [حالات لوحة الأدمن] ==============
+const pendingBroadcast = new Map();
+const pendingUserAction = new Map();
+const pendingAdminAction = new Map();
+const pendingSubAction = new Map();
+const pendingPointsAction = new Map();
+
+// ============== [خريطة الإصدارات] ==============
 const PROTOCOL_MAP = {
-  // إصدارات حديثة جداً (محدثة يدوياً)
   '1.21.140': 880, '1.21.139': 879, '1.21.138': 878, '1.21.137': 877,
   '1.21.136': 876, '1.21.135': 875, '1.21.134': 874, '1.21.133': 873,
-  '1.21.132': 872, '1.21.131': 871,
-  '1.21.130': 870,
-
-  // بقية الإصدارات كما هي...
+  '1.21.132': 872, '1.21.131': 871, '1.21.130': 870,
   '1.21.124.2': 860, '1.21.124': 860, '1.21.123': 859,
   '1.21.120': 859, '1.21.111': 844, '1.21.100': 827,
   '1.21.93': 819, '1.21.90': 818, '1.21.80': 800,
   '1.21.72': 786, '1.21.70': 786, '1.21.60': 776,
   '1.21.50': 766, '1.21.42': 748, '1.21.30': 729,
   '1.21.20': 712, '1.21.2': 686, '1.21.0': 685,
-
-  // إصدارات سابقة
   '1.20.80': 671, '1.20.71': 662, '1.20.61': 649,
   '1.20.50': 630, '1.20.40': 622, '1.20.30': 618,
   '1.20.15': 594, '1.20.10': 594, '1.20.0': 589,
@@ -68,7 +95,251 @@ const PROTOCOL_MAP = {
   '1.19.20': 544, '1.19.10': 534, '1.19.1': 527
 };
 
-// دالة للحصول على أقرب إصدار مدعوم
+// ============== [دوال نظام النقاط] ==============
+function initPointsSystem() {
+  try {
+    ensureDataDir();
+    const pointsPath = path.join(DATA_DIR, 'points_system.json');
+    if (fs.existsSync(pointsPath)) {
+      const data = JSON.parse(fs.readFileSync(pointsPath, 'utf8'));
+      pointsSystem = { ...pointsSystem, ...data };
+    }
+    
+    // دمج الروابط الافتراضية
+    for (const [code, link] of Object.entries(DEFAULT_BONUS_LINKS)) {
+      if (!pointsSystem.bonusLinks[code]) {
+        pointsSystem.bonusLinks[code] = link;
+      }
+    }
+    
+    // إعادة ضبط استخدامات الروابط كل 24 ساعة (اختياري)
+    resetUsedLinksDaily();
+  } catch (error) {
+    console.log('📂 خطأ في تحميل نظام النقاط:', error.message);
+  }
+}
+
+function savePointsSystem() {
+  try {
+    ensureDataDir();
+    const filePath = path.join(DATA_DIR, 'points_system.json');
+    const tempFilePath = filePath + '.tmp';
+    
+    // الكتابة إلى ملف مؤقت أولاً
+    fs.writeFileSync(tempFilePath, JSON.stringify(pointsSystem, null, 2));
+    
+    // استبدال الملف القديم بالمؤقت
+    fs.renameSync(tempFilePath, filePath);
+    console.log('✅ تم حفظ نظام النقاط بنجاح');
+  } catch (error) {
+    console.log('❌ خطأ في حفظ نظام النقاط:', error.message);
+  }
+}
+
+function getUserPoints(userId) {
+  if (!pointsSystem.points[userId]) {
+    pointsSystem.points[userId] = { 
+      balance: 100, 
+      totalEarned: 100, 
+      lastBonus: null,
+      firstJoin: new Date().toISOString(),
+      usedLinks: {} // رابط: تاريخ الاستخدام
+    };
+    savePointsSystem();
+  }
+  return pointsSystem.points[userId];
+}
+
+function addPoints(userId, amount, source = 'bonus') {
+  const userPoints = getUserPoints(userId);
+  userPoints.balance += amount;
+  userPoints.totalEarned += amount;
+  if (source === 'bonus') {
+    userPoints.lastBonus = new Date().toISOString();
+  }
+  savePointsSystem();
+  return userPoints.balance;
+}
+
+function deductPoints(userId, amount) {
+  const userPoints = getUserPoints(userId);
+  if (userPoints.balance >= amount) {
+    userPoints.balance -= amount;
+    savePointsSystem();
+    return true;
+  }
+  return false;
+}
+
+function checkBonusLink(userId, referralCode) {
+  const link = pointsSystem.bonusLinks[referralCode];
+  if (!link) return null;
+  
+  // التحقق من الصلاحية
+  if (link.expiry && new Date() > new Date(link.expiry)) return null;
+  
+  // التحقق من الحد الأقصى للاستخدامات
+  if (link.uses >= link.maxUses) return null;
+  
+  // التحقق من أن المستخدم لم يستخدم الرابط من قبل
+  const userPoints = getUserPoints(userId);
+  if (userPoints.usedLinks && userPoints.usedLinks[referralCode]) {
+    // إذا مر 24 ساعة يمكنه استخدامه مرة أخرى
+    const lastUse = new Date(userPoints.usedLinks[referralCode]);
+    const hoursDiff = (new Date() - lastUse) / (1000 * 60 * 60);
+    if (hoursDiff < 24) return null; // لم تمر 24 ساعة
+  }
+  
+  return link;
+}
+
+function useBonusLink(userId, referralCode) {
+  const link = pointsSystem.bonusLinks[referralCode];
+  if (!link) return false;
+  
+  // زيادة عدد استخدامات الرابط
+  link.uses = (link.uses || 0) + 1;
+  
+  // تسجيل استخدام المستخدم للرابط
+  const userPoints = getUserPoints(userId);
+  if (!userPoints.usedLinks) userPoints.usedLinks = {};
+  userPoints.usedLinks[referralCode] = new Date().toISOString();
+  
+  savePointsSystem();
+  return link;
+}
+
+function resetUsedLinksDaily() {
+  // هذه الوظيفة يمكن تفعيلها يدوياً من لوحة الأدمن
+  const now = new Date();
+  const resetTime = new Date();
+  resetTime.setHours(0, 0, 0, 0);
+  
+  // إذا كانت الساعة 12 صباحاً، أعد ضبط استخدامات الروابط
+  if (now.getHours() === 0 && now.getMinutes() < 5) {
+    for (const code in pointsSystem.bonusLinks) {
+      if (pointsSystem.bonusLinks[code].creator === 'system') {
+        pointsSystem.bonusLinks[code].uses = 0;
+      }
+    }
+    
+    // مسح سجلات استخدام المستخدمين للروابط
+    for (const userId in pointsSystem.points) {
+      if (pointsSystem.points[userId].usedLinks) {
+        pointsSystem.points[userId].usedLinks = {};
+      }
+    }
+    
+    savePointsSystem();
+    console.log('🔄 تم إعادة ضبط استخدامات الروابط اليومية');
+  }
+}
+
+function createActiveBot(userId, botCount = 1) {
+  const startTime = Date.now();
+  pointsSystem.activeBots[userId] = {
+    startTime: startTime,
+    hours: 6,
+    botCount: botCount,
+    endTime: startTime + (6 * 60 * 60 * 1000),
+    active: true
+  };
+  
+  // إعداد مؤقت للإيقاف بعد 6 ساعات
+  if (pointsSystem.timers[userId]) {
+    clearTimeout(pointsSystem.timers[userId]);
+  }
+  
+  pointsSystem.timers[userId] = setTimeout(() => {
+    autoStopUserBots(userId);
+  }, 6 * 60 * 60 * 1000);
+  
+  savePointsSystem();
+}
+
+function removeActiveBot(userId) {
+  if (pointsSystem.timers[userId]) {
+    clearTimeout(pointsSystem.timers[userId]);
+    delete pointsSystem.timers[userId];
+  }
+  if (pointsSystem.activeBots[userId]) {
+    pointsSystem.activeBots[userId].active = false;
+  }
+  delete pointsSystem.activeBots[userId];
+  savePointsSystem();
+}
+
+function checkActiveBot(userId) {
+  const activeBot = pointsSystem.activeBots[userId];
+  if (!activeBot || !activeBot.active) return null;
+  
+  const now = Date.now();
+  if (now >= activeBot.endTime) {
+    removeActiveBot(userId);
+    return null;
+  }
+  
+  const remainingMs = activeBot.endTime - now;
+  const remainingHours = (remainingMs / (1000 * 60 * 60)).toFixed(1);
+  
+  return {
+    ...activeBot,
+    remainingHours: remainingHours
+  };
+}
+
+function canStartBot(userId) {
+  // المالك يستطيع دائماً
+  if (userId === ownerId) return { canStart: true, reason: 'owner' };
+  
+  // التحقق من وجود بوت نشط
+  const activeBot = checkActiveBot(userId);
+  if (activeBot) {
+    return { 
+      canStart: false, 
+      reason: `⛔ لديك بوت نشط بالفعل!\n\n⏰ المتبقي: ${activeBot.remainingHours} ساعة\n\nيرجى الانتظار حتى ينتهي الوقت أو إيقاف البوت الحالي.`,
+      remainingHours: activeBot.remainingHours
+    };
+  }
+  
+  // التحقق من النقاط
+  const userPoints = getUserPoints(userId);
+  if (userPoints.balance < 100) {
+    return { 
+      canStart: false, 
+      reason: `❌ نقاطك غير كافية!\n\nتحتاج 100 نقطة، لديك ${userPoints.balance} نقطة فقط.\n\n🎯 اربط السيرفر واضغط على /points لمعرفة طرق زيادة النقاط.`,
+      neededPoints: 100 - userPoints.balance
+    };
+  }
+  
+  return { canStart: true, reason: 'success' };
+}
+
+function autoStopUserBots(userId) {
+  // إيقاف جميع اتصالات المستخدم
+  Object.keys(clients).forEach(key => {
+    if (key.startsWith(userId + '_')) {
+      try {
+        clients[key].end();
+        console.log(`⏰ تلقائي: إيقاف بوت ${key} بعد 6 ساعات`);
+      } catch (err) {}
+      delete clients[key];
+    }
+  });
+  
+  // إرسال إشعار للمستخدم
+  bot.telegram.sendMessage(userId, 
+    '⏰ *انتهت المدة!*\n\n' +
+    'تم إيقاف البوت تلقائياً بعد 6 ساعات من التشغيل.\n' +
+    '💰 يمكنك تشغيله مرة أخرى بـ 100 نقطة.\n\n' +
+    '📥 أرسل IP السيرفر وPort للبدء من جديد.',
+    { parse_mode: 'Markdown' }
+  ).catch(() => {});
+  
+  removeActiveBot(userId);
+}
+
+// ============== [دالة للحصول على أقرب إصدار مدعوم] ==============
 function getClosestVersion(requestedVersion) {
   if (PROTOCOL_MAP[requestedVersion]) {
     return requestedVersion;
@@ -89,12 +360,19 @@ function getClosestVersion(requestedVersion) {
     }
   }
 
-  return '1.21.124'; // افتراضي
+  return '1.21.124';
 }
 
 // ============== [وظائف الملفات] ==============
 function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      console.log(`✅ تم إنشاء مجلد البيانات: ${DATA_DIR}`);
+    }
+  } catch (error) {
+    console.log('❌ خطأ في إنشاء مجلد البيانات:', error.message);
+  }
 }
 
 function safeReadJSON(filePath, fallback) {
@@ -104,6 +382,7 @@ function safeReadJSON(filePath, fallback) {
     if (!raw) return fallback;
     return JSON.parse(raw);
   } catch (e) {
+    console.log(`❌ خطأ في قراءة ${filePath}:`, e.message);
     return fallback;
   }
 }
@@ -128,93 +407,126 @@ function loadData() {
     subChannels = safeReadJSON(subChannelsPath, DEFAULT_SUB_CHANNELS);
     settings = safeReadJSON(settingsPath, { forceSubscription: true });
 
-    // نظافة بيانات القنوات
     if (!Array.isArray(subChannels)) subChannels = DEFAULT_SUB_CHANNELS;
     subChannels = subChannels
       .filter(ch => ch && (typeof ch.id === 'string' || typeof ch.id === 'number'))
       .map(ch => ({ id: ch.id, url: ch.url || '', title: ch.title || '' }));
 
-    // تأكد من شكل settings
     if (!settings || typeof settings !== 'object') settings = { forceSubscription: true };
     if (typeof settings.forceSubscription !== 'boolean') settings.forceSubscription = true;
 
-    // تأكد أن المالك موجود كأدمن (للاستخدام لاحقاً لو وسّعت الصلاحيات)
     if (!admins.includes(ownerId)) admins.unshift(ownerId);
 
+    console.log('✅ تم تحميل البيانات بنجاح');
   } catch (error) {
-    console.log('📂 لا توجد بيانات سابقة أو خطأ في التحميل');
+    console.log('📂 خطأ في تحميل البيانات:', error.message);
   }
 }
 
 function saveServers() {
   try {
     ensureDataDir();
-    fs.writeFileSync(path.join(DATA_DIR, 'servers.json'), JSON.stringify(servers, null, 2));
+    const filePath = path.join(DATA_DIR, 'servers.json');
+    const tempFilePath = filePath + '.tmp';
+    
+    // الكتابة إلى ملف مؤقت أولاً
+    fs.writeFileSync(tempFilePath, JSON.stringify(servers, null, 2));
+    
+    // استبدال الملف القديم بالمؤقت
+    fs.renameSync(tempFilePath, filePath);
+    console.log('✅ تم حفظ السيرفرات بنجاح');
   } catch (error) {
-    console.log('❌ خطأ في حفظ السيرفرات');
+    console.log('❌ خطأ في حفظ السيرفرات:', error.message);
   }
 }
 
 function saveUsers() {
   try {
     ensureDataDir();
-    fs.writeFileSync(path.join(DATA_DIR, 'users.json'), JSON.stringify(users, null, 2));
+    const filePath = path.join(DATA_DIR, 'users.json');
+    const tempFilePath = filePath + '.tmp';
+    
+    fs.writeFileSync(tempFilePath, JSON.stringify(users, null, 2));
+    fs.renameSync(tempFilePath, filePath);
+    console.log('✅ تم حفظ المستخدمين بنجاح');
   } catch (error) {
-    console.log('❌ خطأ في حفظ المستخدمين');
+    console.log('❌ خطأ في حفظ المستخدمين:', error.message);
   }
 }
 
 function saveUserMeta() {
   try {
     ensureDataDir();
-    fs.writeFileSync(path.join(DATA_DIR, 'users_meta.json'), JSON.stringify(userMeta, null, 2));
+    const filePath = path.join(DATA_DIR, 'users_meta.json');
+    const tempFilePath = filePath + '.tmp';
+    
+    fs.writeFileSync(tempFilePath, JSON.stringify(userMeta, null, 2));
+    fs.renameSync(tempFilePath, filePath);
+    console.log('✅ تم حفظ بيانات المستخدمين الإضافية بنجاح');
   } catch (error) {
-    console.log('❌ خطأ في حفظ بيانات المستخدمين الإضافية');
+    console.log('❌ خطأ في حفظ بيانات المستخدمين الإضافية:', error.message);
   }
 }
 
 function saveBans() {
   try {
     ensureDataDir();
-    fs.writeFileSync(path.join(DATA_DIR, 'banned.json'), JSON.stringify(bannedUsers, null, 2));
+    const filePath = path.join(DATA_DIR, 'banned.json');
+    const tempFilePath = filePath + '.tmp';
+    
+    fs.writeFileSync(tempFilePath, JSON.stringify(bannedUsers, null, 2));
+    fs.renameSync(tempFilePath, filePath);
+    console.log('✅ تم حفظ قائمة الحظر بنجاح');
   } catch (error) {
-    console.log('❌ خطأ في حفظ قائمة الحظر');
+    console.log('❌ خطأ في حفظ قائمة الحظر:', error.message);
   }
 }
 
 function saveAdmins() {
   try {
     ensureDataDir();
-    fs.writeFileSync(path.join(DATA_DIR, 'admins.json'), JSON.stringify(admins, null, 2));
+    const filePath = path.join(DATA_DIR, 'admins.json');
+    const tempFilePath = filePath + '.tmp';
+    
+    fs.writeFileSync(tempFilePath, JSON.stringify(admins, null, 2));
+    fs.renameSync(tempFilePath, filePath);
+    console.log('✅ تم حفظ قائمة المسؤولين بنجاح');
   } catch (error) {
-    console.log('❌ خطأ في حفظ قائمة المسؤولين');
+    console.log('❌ خطأ في حفظ قائمة المسؤولين:', error.message);
   }
 }
-
 
 function saveSubChannels() {
   try {
     ensureDataDir();
-    fs.writeFileSync(path.join(DATA_DIR, 'sub_channels.json'), JSON.stringify(subChannels, null, 2));
+    const filePath = path.join(DATA_DIR, 'sub_channels.json');
+    const tempFilePath = filePath + '.tmp';
+    
+    fs.writeFileSync(tempFilePath, JSON.stringify(subChannels, null, 2));
+    fs.renameSync(tempFilePath, filePath);
+    console.log('✅ تم حفظ قنوات الاشتراك بنجاح');
   } catch (error) {
-    console.log('❌ خطأ في حفظ قنوات الاشتراك');
+    console.log('❌ خطأ في حفظ قنوات الاشتراك:', error.message);
   }
 }
 
 function saveSettings() {
   try {
     ensureDataDir();
-    fs.writeFileSync(path.join(DATA_DIR, 'settings.json'), JSON.stringify(settings, null, 2));
+    const filePath = path.join(DATA_DIR, 'settings.json');
+    const tempFilePath = filePath + '.tmp';
+    
+    fs.writeFileSync(tempFilePath, JSON.stringify(settings, null, 2));
+    fs.renameSync(tempFilePath, filePath);
+    console.log('✅ تم حفظ الإعدادات بنجاح');
   } catch (error) {
-    console.log('❌ خطأ في حفظ الإعدادات');
+    console.log('❌ خطأ في حفظ الإعدادات:', error.message);
   }
 }
 
 // ============== [فحص الاشتراك] ==============
-
 async function checkSubscription(ctx) {
   try {
-    // المالك يتجاوز الاشتراك
     if (ctx?.from?.id === ownerId) return true;
     if (!settings?.forceSubscription) return true;
 
@@ -228,6 +540,7 @@ async function checkSubscription(ctx) {
     }
     return true;
   } catch (err) {
+    console.log('❌ خطأ في فحص الاشتراك:', err.message);
     return false;
   }
 }
@@ -243,7 +556,17 @@ function buildSubscriptionKeyboard() {
   return Markup.inlineKeyboard(rows);
 }
 
-function buildVersionKeyboard(isOwnerUser) {
+function buildVersionKeyboard(isOwnerUser, userId) {
+  const userPoints = getUserPoints(userId);
+  const activeBot = checkActiveBot(userId);
+  
+  let pointsStatus = `💰 نقاطك: ${userPoints.balance}`;
+  if (activeBot) {
+    pointsStatus += ` | ⏳ بوت نشط (${activeBot.remainingHours} ساعة)`;
+  } else if (userPoints.balance < 100) {
+    pointsStatus += ` | 💸 تحتاج ${100 - userPoints.balance} نقطة للتشغيل`;
+  }
+  
   const rows = [
     [Markup.button.callback('✨NEW 1.21.131', 'ver_1.21.131')],
     [Markup.button.callback('🚀 1.21.130', 'ver_1.21.130')],
@@ -254,21 +577,50 @@ function buildVersionKeyboard(isOwnerUser) {
     [Markup.button.callback('1.21.93', 'ver_1.21.93')],
     [Markup.button.callback('1.21.84', 'ver_1.21.84')],
     [Markup.button.callback('1.21.80', 'ver_1.21.80')],
-    [Markup.button.callback('المزيد ⬇️', 'more_versions')]
+    [Markup.button.callback('💰 نقاطي وإحصائياتي', 'my_points_stats')]
   ];
-  if (isOwnerUser) rows.push([Markup.button.callback('🛠 لوحة الأدمن', 'admin_panel')]);
-  return Markup.inlineKeyboard(rows);
+  
+  if (isOwnerUser) {
+    rows.push([Markup.button.callback('🛠 لوحة الأدمن', 'admin_panel')]);
+  }
+  
+  return {
+    reply_markup: Markup.inlineKeyboard(rows),
+    caption: pointsStatus
+  };
 }
 
 async function showMainMenu(ctx) {
   const isOwnerUser = ctx?.from?.id === ownerId;
-  return ctx.reply('🎮 أهلاً بك في بوت Minecraft by IBR!\n\nاختر إصدار اللعبة:', {
-    parse_mode: 'Markdown',
-    ...buildVersionKeyboard(isOwnerUser)
-  });
+  const userId = ctx?.from?.id;
+  const keyboardConfig = buildVersionKeyboard(isOwnerUser, userId);
+  
+  const message = `🎮 *أهلاً بك في بوت Minecraft by IBR!*\n\n` +
+                 `*${keyboardConfig.caption}*\n\n` +
+                 `اختر إصدار اللعبة:`;
+  
+  try {
+    if (ctx.callbackQuery) {
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        ...keyboardConfig.reply_markup
+      });
+    } else {
+      await ctx.reply(message, {
+        parse_mode: 'Markdown',
+        ...keyboardConfig.reply_markup
+      });
+    }
+  } catch (error) {
+    console.log('❌ خطأ في عرض القائمة الرئيسية:', error.message);
+    try {
+      await ctx.reply(message, {
+        parse_mode: 'Markdown',
+        ...keyboardConfig.reply_markup
+      });
+    } catch (e) {}
+  }
 }
-
-
 
 // ============== [مساعدات لوحة الأدمن] ==============
 function isOwner(ctx) {
@@ -280,72 +632,77 @@ async function safeAnswerCbQuery(ctx, text, opts = {}) {
     if (ctx?.callbackQuery) {
       await ctx.answerCbQuery(text, opts);
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    console.log('❌ خطأ في safeAnswerCbQuery:', e.message);
+  }
 }
 
 async function safeEditOrReply(ctx, text, extra = {}) {
-  // ملاحظة: كثير من الأزرار قد تفشل بسبب Markdown إذا كانت البيانات تحتوي رموز خاصة.
-  // لذلك نحاول أولاً بالخيارات الأصلية، ثم نعيد المحاولة بدون parse_mode لضمان أن كل زر "يرد" دائماً.
   const extraPlain = { ...(extra || {}) };
-  if (extraPlain && Object.prototype.hasOwnProperty.call(extraPlain, 'parse_mode')) {
-    delete extraPlain.parse_mode;
-  }
+  if (extraPlain.parse_mode) delete extraPlain.parse_mode;
 
-  // 1) حاول تعديل الرسالة (في حال callback)
   if (ctx?.callbackQuery) {
     try {
       await ctx.editMessageText(text, extra);
       return;
     } catch (e1) {
+      console.log('❌ خطأ في تعديل الرسالة:', e1.message);
       try {
         await ctx.editMessageText(text, extraPlain);
         return;
       } catch (e2) {
-        // سنحاول إرسال رسالة جديدة
+        console.log('❌ خطأ في تعديل الرسالة بدون parse_mode:', e2.message);
+        try {
+          await ctx.reply(text, extra);
+        } catch (e3) {
+          console.log('❌ خطأ في إرسال رد جديد:', e3.message);
+          try {
+            await ctx.reply(text, extraPlain);
+          } catch (e4) {
+            console.log('❌ خطأ في إرسال رد جديد بدون parse_mode:', e4.message);
+          }
+        }
+      }
+    }
+  } else {
+    try {
+      await ctx.reply(text, extra);
+    } catch (e3) {
+      console.log('❌ خطأ في إرسال الرسالة:', e3.message);
+      try {
+        await ctx.reply(text, extraPlain);
+      } catch (e4) {
+        console.log('❌ خطأ في إرسال الرسالة بدون parse_mode:', e4.message);
       }
     }
   }
-
-  // 2) حاول الرد برسالة جديدة
-  try {
-    await ctx.reply(text, extra);
-  } catch (e3) {
-    try {
-      await ctx.reply(text, extraPlain);
-    } catch (e4) { /* ignore */ }
-  }
 }
-
-function formatBytes(bytes) {
-  if (!bytes || bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let num = bytes;
-  while (num >= 1024 && i < units.length - 1) {
-    num /= 1024;
-    i++;
-  }
-  return `${num.toFixed(2)} ${units[i]}`;
-}
-
 
 async function renderAdminPanel(ctx) {
   const totalUsers = users.length;
   const totalServers = Object.keys(servers).filter(uid => servers[uid]?.ip).length;
   const activeBots = Object.keys(clients).length;
+  
+  const totalPoints = Object.values(pointsSystem.points).reduce((sum, user) => sum + user.balance, 0);
+  const totalEarned = Object.values(pointsSystem.points).reduce((sum, user) => sum + user.totalEarned, 0);
+  const activeBotsCount = Object.keys(pointsSystem.activeBots).filter(uid => pointsSystem.activeBots[uid]?.active).length;
 
   const text =
     `🛠️ *لوحة تحكم المالك*\n\n` +
     `📊 *إحصائيات مباشرة:*\n` +
     `👥 المستخدمين: *${totalUsers}*\n` +
     `🌐 السيرفرات: *${totalServers}*\n` +
-    `🤖 البوتات النشطة: *${activeBots}*\n\n` +
+    `🤖 البوتات النشطة: *${activeBots}*\n` +
+    `💰 إجمالي النقاط: *${totalPoints}*\n` +
+    `📈 إجمالي الأرباح: *${totalEarned}*\n` +
+    `⏳ البوتات النشطة بالنظام: *${activeBotsCount}*\n\n` +
     `اختر إجراء من الأزرار بالأسفل:`;
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback('📢 إذاعة للكل', 'admin_broadcast')],
     [Markup.button.callback('📊 الإحصائيات (تفصيل)', 'admin_stats')],
     [Markup.button.callback('👤 إدارة المستخدمين', 'admin_users')],
+    [Markup.button.callback('💰 إدارة النقاط', 'admin_points')],
     [Markup.button.callback('📋 قائمة جميع المستخدمين', 'admin_all_users:1')],
     [Markup.button.callback('🖥️ عرض كل السيرفرات', 'admin_all_servers:1')],
     [Markup.button.callback('📌 إدارة قنوات الاشتراك', 'admin_sub_channels')],
@@ -357,8 +714,6 @@ async function renderAdminPanel(ctx) {
   await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
 }
 
-
-
 // ============== [Middleware: منع المحظورين] ==============
 bot.use(async (ctx, next) => {
   try {
@@ -367,156 +722,375 @@ bot.use(async (ctx, next) => {
     if (uid === ownerId) return next();
 
     if (bannedUsers.includes(uid)) {
-      // لا نزعج المستخدم بكثرة، فقط تجاهل أو أعطه رسالة واحدة في /start
       if (ctx?.message?.text === '/start') {
-        try { await ctx.reply('🚫 تم حظرك من استخدام البوت.'); } catch (e) { /* ignore */ }
+        try { await ctx.reply('🚫 تم حظرك من استخدام البوت.'); } catch (e) {}
       }
       return;
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    console.log('❌ خطأ في middleware:', e.message);
+  }
   return next();
 });
 
-// ============== [نظام منع النسخ المتعددة] ==============
-let isShuttingDown = false;
-
-async function gracefulShutdown(signal) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-
-  console.log(`\n🛑 استقبال إشارة ${signal}...`);
-
-  console.log('🛑 إيقاف اتصالات ماينكرافت...');
-  Object.keys(clients).forEach(key => {
-    try {
-      clients[key].end();
-      console.log(`✓ تم إيقاف: ${key}`);
-    } catch (err) {}
-  });
-
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  console.log('🛑 إيقاف بوت تلغرام...');
-  try {
-    await bot.stop(signal);
-    console.log('✅ تم إيقاف البوت بنجاح');
-  } catch (err) {
-    console.error('❌ خطأ في إيقاف البوت:', err.message);
-  }
-
-  process.exit(0);
-}
-
-// ============== [الاتصال الذكي] ==============
-// ============== [إصلاح دالة smartConnect لمنع التوقف] ==============
-async function smartConnect(ip, port, requestedVersion, userId, botName = 'IBR_Bot') {
-  try {
-    const versionsToTry = [];
-    const closestVersion = getClosestVersion(requestedVersion);
-
-    versionsToTry.push(requestedVersion);
-
-    if (requestedVersion !== closestVersion) {
-      versionsToTry.push(closestVersion);
-    }
-
-    const commonVersions = ['1.21.124', '1.21.100', '1.21.80'];
-    commonVersions.forEach(v => {
-      if (!versionsToTry.includes(v) && PROTOCOL_MAP[v]) {
-        versionsToTry.push(v);
-      }
-    });
-
-    console.log(`🔄 محاولة الإصدارات: ${versionsToTry.join(', ')}`);
-
-    let lastError = null;
-
-    for (const version of versionsToTry) {
-      const protocol = PROTOCOL_MAP[version];
-      if (!protocol) continue;
-
-      try {
-        console.log(`🔗 محاولة ${version} (بروتوكول: ${protocol})`);
-
-        const client = createClient({
-          host: ip,
-          port: port,
-          username: botName,
-          version: version,
-          offline: true,
-          connectTimeout: 10000,
-          protocolVersion: protocol,
-          skipPing: false,
-          raknetBackoff: true
-        });
-
-        const connectionResult = await new Promise((resolve) => {
-          const timeout = setTimeout(() => {
-            try { client.end(); } catch (e) {}
-            resolve({ success: false, error: 'انتهت مهلة الاتصال' });
-          }, 10000);
-
-          client.once('join', () => {
-            clearTimeout(timeout);
-            resolve({ success: true, client });
-          });
-
-          client.once('error', (err) => {
-            clearTimeout(timeout);
-            try { client.end(); } catch (e) {}
-            resolve({ success: false, error: err.message });
-          });
-
-          client.once('disconnect', () => {
-            clearTimeout(timeout);
-            try { client.end(); } catch (e) {}
-            resolve({ success: false, error: 'انقطع الاتصال' });
-          });
-        });
-
-        if (connectionResult.success) {
-          return {
-            success: true,
-            client: connectionResult.client,
-            versionUsed: version,
-            protocolUsed: protocol,
-            requestedVersion,
-            message: version === requestedVersion ?
-              `✅ تم الاتصال بالإصدار ${version}` :
-              `✅ تم الاتصال بالإصدار ${version} (بديل عن ${requestedVersion})`
-          };
-        } else {
-          lastError = connectionResult.error;
-          console.log(`❌ فشل ${version}: ${connectionResult.error}`);
-        }
-
-      } catch (error) {
-        lastError = error.message;
-        console.log(`💥 خطأ في محاولة ${version}: ${error.message}`);
-        continue;
-      }
-    }
-
-    return {
-      success: false,
-      error: lastError || 'فشل جميع المحاولات',
-      requestedVersion
-    };
-
-  } catch (error) {
-    console.error(`🔥 خطأ محتوى في smartConnect: ${error.message}`);
-    return {
-      success: false,
-      error: 'حدث خطأ داخلي',
-      requestedVersion
-    };
-  }
-}
-
 // ============== [تحميل البيانات] ==============
 loadData();
+initPointsSystem();
 
-// ============== [أوامر لوحة الأدمن] ==============
+// ============== [معالجة الأخطاء العالمية] ==============
+process.on('uncaughtException', (error) => {
+  console.error('❌ خطأ غير معالج:', error.message);
+  console.error(error.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ وعد مرفوض غير معالج:', reason);
+});
+
+// ============== [أوامر نظام النقاط] ==============
+bot.action('my_points_stats', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+  const userId = ctx.from.id;
+  const userPoints = getUserPoints(userId);
+  const activeBot = checkActiveBot(userId);
+  
+  let message = `💰 *نظام النقاط*\n\n`;
+  message += `🏦 الرصيد الحالي: *${userPoints.balance} نقطة*\n`;
+  message += `📈 إجمالي ما ربحته: *${userPoints.totalEarned} نقطة*\n\n`;
+  
+  if (activeBot) {
+    message += `🤖 *بوت نشط:*\n`;
+    message += `⏰ المدة: 6 ساعة\n`;
+    message += `⏳ المتبقي: ${activeBot.remainingHours} ساعة\n`;
+    message += `🤖 عدد البوتات: ${activeBot.botCount}\n\n`;
+  } else {
+    message += `🔋 *لا يوجد بوت نشط*\n`;
+    message += `لتشغيل بوت جديد: تحتاج *100 نقطة*\n\n`;
+  }
+  
+  message += `📋 *طرق زيادة النقاط:*\n`;
+  message += `• اطلب الروابط من قناة البوت\n`;
+  message += `• كل رابط يعطيك 100 نقطة\n`;
+  message += `• كل رابط يستخدم مرة واحدة\n`;
+  message += `• الروابط تتجدد كل 24 ساعة\n\n`;
+  
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.url('📢 قناة البوت للروابط', 'https://t.me/+c7sbwOViyhNmYzAy')],
+    [Markup.button.callback('🤖 تشغيل بوت جديد (100 نقطة)', 'start_bot_with_points')],
+    [Markup.button.callback('📊 إحصائيات مفصلة', 'detailed_stats')],
+    [Markup.button.callback('🔙 رجوع', 'back_to_main')]
+  ]);
+  
+  try {
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...keyboard
+    });
+  } catch (error) {
+    console.log('❌ خطأ في my_points_stats:', error.message);
+    await safeAnswerCbQuery(ctx, '❌ حدث خطأ، يرجى المحاولة مرة أخرى', { show_alert: true });
+  }
+});
+
+bot.action('detailed_stats', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+  const userId = ctx.from.id;
+  const userPoints = getUserPoints(userId);
+  const activeBot = checkActiveBot(userId);
+  
+  let message = `📊 *إحصائيات مفصلة*\n\n`;
+  message += `👤 *معلومات المستخدم:*\n`;
+  message += `🆔 المعرف: ${userId}\n`;
+  message += `🏦 الرصيد: ${userPoints.balance} نقطة\n`;
+  message += `📈 إجمالي الأرباح: ${userPoints.totalEarned} نقطة\n`;
+  
+  if (userPoints.firstJoin) {
+    const joinDate = new Date(userPoints.firstJoin).toLocaleString('ar-SA');
+    message += `📅 الانضمام: ${joinDate}\n`;
+  }
+  
+  message += `\n🤖 *حالة البوت:*\n`;
+  
+  if (activeBot) {
+    const startTime = new Date(activeBot.startTime).toLocaleString('ar-SA');
+    const endTime = new Date(activeBot.endTime).toLocaleString('ar-SA');
+    
+    message += `✅ نشط\n`;
+    message += `⏰ بدأ: ${startTime}\n`;
+    message += `⏳ ينتهي: ${endTime}\n`;
+    message += `⏱️ المتبقي: ${activeBot.remainingHours} ساعة\n`;
+    message += `🤖 العدد: ${activeBot.botCount} بوت\n`;
+  } else {
+    message += `❌ غير نشط\n`;
+    message += `💡 تحتاج 100 نقطة للتشغيل\n`;
+  }
+  
+  message += `\n📋 *معلومات النظام:*\n`;
+  message += `🎯 تكلفة التشغيل: 100 نقطة\n`;
+  message += `⏰ مدة التشغيل: 6 ساعات\n`;
+  message += `🔄 يمكن تجديد التشغيل بعد انتهاء المدة\n`;
+  
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🤖 تشغيل بوت جديد', 'start_bot_with_points')],
+    [Markup.button.callback('🔙 رجوع', 'my_points_stats')]
+  ]);
+  
+  try {
+    await ctx.editMessageText(message, {
+      parse_mode: 'Markdown',
+      ...keyboard
+    });
+  } catch (error) {
+    console.log('❌ خطأ في detailed_stats:', error.message);
+  }
+});
+
+bot.action('back_to_main', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+  await showMainMenu(ctx);
+});
+
+bot.action('start_bot_with_points', async (ctx) => {
+  const userId = ctx.from.id;
+  
+  const check = canStartBot(userId);
+  
+  if (!check.canStart) {
+    return safeAnswerCbQuery(ctx, check.reason, { show_alert: true });
+  }
+  
+  if (!servers[userId] || !servers[userId].ip) {
+    await safeAnswerCbQuery(ctx, '❌ أضف السيرفر أولاً!', { show_alert: true });
+    return ctx.reply('📥 أرسل IP السيرفر وPort:\nمثال:\nplay.server.com:19132');
+  }
+  
+  await safeAnswerCbQuery(ctx, '🤖 جاري التحقق من النقاط...');
+  
+  const deducted = deductPoints(userId, 100);
+  if (!deducted) {
+    return safeAnswerCbQuery(ctx, '❌ نقاطك غير كافية!', { show_alert: true });
+  }
+  
+  createActiveBot(userId, 1);
+  
+  try {
+    await ctx.editMessageText(`✅ *تم خصم 100 نقطة*\n💰 رصيدك الجديد: ${getUserPoints(userId).balance}\n⏰ سيشتغل البوت لمدة 6 ساعات\n\n🎮 اختر إصدار اللعبة:`, {
+      parse_mode: 'Markdown',
+      ...buildVersionKeyboard(userId === ownerId, userId).reply_markup
+    });
+  } catch (error) {
+    console.log('❌ خطأ في start_bot_with_points:', error.message);
+  }
+});
+
+// ============== [لوحة الأدمن للنقاط] ==============
+bot.action('admin_points', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  await safeAnswerCbQuery(ctx);
+  
+  const totalPoints = Object.values(pointsSystem.points).reduce((sum, user) => sum + user.balance, 0);
+  const totalEarned = Object.values(pointsSystem.points).reduce((sum, user) => sum + user.totalEarned, 0);
+  const activeBotsCount = Object.keys(pointsSystem.activeBots).filter(uid => pointsSystem.activeBots[uid]?.active).length;
+  const totalUsersWithPoints = Object.keys(pointsSystem.points).length;
+  
+  const text =
+    `💰 *إدارة نظام النقاط*\n\n` +
+    `📊 *الإحصائيات:*\n` +
+    `👥 مستخدمين بالنقاط: *${totalUsersWithPoints}*\n` +
+    `🏦 إجمالي النقاط: *${totalPoints}*\n` +
+    `📈 إجمالي الأرباح: *${totalEarned}*\n` +
+    `⏳ بوتات نشطة: *${activeBotsCount}*\n\n` +
+    `اختر الإجراء:`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('➕ إضافة نقاط لمستخدم', 'admin_add_points')],
+    [Markup.button.callback('➖ خصم نقاط من مستخدم', 'admin_remove_points')],
+    [Markup.button.callback('📋 عرض أعلى الرصيد', 'admin_top_points')],
+    [Markup.button.callback('🎁 إدارة روابط المكافآت', 'admin_bonus_links')],
+    [Markup.button.callback('🔄 إعادة تعيين الروابط', 'admin_reset_links')],
+    [Markup.button.callback('🔙 رجوع', 'admin_panel')]
+  ]);
+
+  await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('admin_add_points', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  
+  pendingPointsAction.set(ownerId, { action: 'add' });
+  
+  const text = `➕ *إضافة نقاط*\n\n` +
+    `أرسل الـID والنقاط بهذا الشكل:\n` +
+    `\`123456789 100\`\n\n` +
+    `مثال: لإضافة 100 نقطة للمستخدم 123456789`;
+  
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('❌ إلغاء', 'admin_points_cancel')],
+    [Markup.button.callback('🔙 رجوع', 'admin_points')]
+  ]);
+  
+  await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('admin_remove_points', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  
+  pendingPointsAction.set(ownerId, { action: 'remove' });
+  
+  const text = `➖ *خصم نقاط*\n\n` +
+    `أرسل الـID والنقاط بهذا الشكل:\n` +
+    `\`123456789 50\`\n\n` +
+    `مثال: لخصم 50 نقطة من المستخدم 123456789`;
+  
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('❌ إلغاء', 'admin_points_cancel')],
+    [Markup.button.callback('🔙 رجوع', 'admin_points')]
+  ]);
+  
+  await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('admin_points_cancel', async (ctx) => {
+  if (!isOwner(ctx)) return;
+  pendingPointsAction.delete(ownerId);
+  await safeAnswerCbQuery(ctx, 'تم الإلغاء ✅');
+  await renderAdminPanel(ctx);
+});
+
+bot.action('admin_bonus_links', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  await safeAnswerCbQuery(ctx);
+  
+  let message = `🎁 *إدارة روابط المكافآت*\n\n`;
+  let linkNumber = 1;
+  
+  for (const [code, link] of Object.entries(pointsSystem.bonusLinks)) {
+    const usedCount = link.uses || 0;
+    const maxUses = link.maxUses || 1;
+    const creator = link.creator || 'system';
+    const expiry = link.expiry ? new Date(link.expiry).toLocaleString('ar-SA') : 'لا نهائي';
+    
+    message += `${linkNumber}. *${code}*\n`;
+    message += `   🎯 النقاط: ${link.points}\n`;
+    message += `   📊 الاستخدامات: ${usedCount}/${maxUses}\n`;
+    message += `   👤 المنشئ: ${creator}\n`;
+    message += `   ⏰ الانتهاء: ${expiry}\n`;
+    message += `   🔗 https://t.me/IBR_Atrenos_bot?start=${code}\n\n`;
+    
+    linkNumber++;
+  }
+  
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('➕ إنشاء رابط جديد', 'admin_create_bonus_link')],
+    [Markup.button.callback('🗑️ حذف رابط', 'admin_delete_bonus_link')],
+    [Markup.button.callback('✏️ تعديل رابط', 'admin_edit_bonus_link')],
+    [Markup.button.callback('🔄 تحديث', 'admin_bonus_links')],
+    [Markup.button.callback('🔙 رجوع', 'admin_points')]
+  ]);
+  
+  await safeEditOrReply(ctx, message, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('admin_create_bonus_link', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  
+  pendingPointsAction.set(ownerId, { action: 'create_link' });
+  
+  const text = `➕ *إنشاء رابط جديد*\n\n` +
+    `أرسل تفاصيل الرابط بهذا الشكل:\n` +
+    `\`اسم_الرابط 100 5\`\n\n` +
+    `مثال: لإنشاء رابط باسم bonus_new يعطي 100 نقطة ويمكن استخدامه 5 مرات\n\n` +
+    `⚠️ ملاحظة: اسم الرابط يجب أن يكون فريداً ولا يحتوي على مسافات`;
+  
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('❌ إلغاء', 'admin_points_cancel')],
+    [Markup.button.callback('🔙 رجوع', 'admin_bonus_links')]
+  ]);
+  
+  await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('admin_delete_bonus_link', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  
+  pendingPointsAction.set(ownerId, { action: 'delete_link' });
+  
+  const text = `🗑️ *حذف رابط*\n\n` +
+    `أرسل اسم الرابط الذي تريد حذفه:\n\n` +
+    `الروابط المتاحة:\n` +
+    Object.keys(pointsSystem.bonusLinks).map(code => `• ${code}`).join('\n');
+  
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('❌ إلغاء', 'admin_points_cancel')],
+    [Markup.button.callback('🔙 رجوع', 'admin_bonus_links')]
+  ]);
+  
+  await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('admin_reset_links', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  
+  for (const code in pointsSystem.bonusLinks) {
+    if (pointsSystem.bonusLinks[code].creator === 'system') {
+      pointsSystem.bonusLinks[code].uses = 0;
+    }
+  }
+  
+  for (const userId in pointsSystem.points) {
+    if (pointsSystem.points[userId].usedLinks) {
+      pointsSystem.points[userId].usedLinks = {};
+    }
+  }
+  
+  savePointsSystem();
+  
+  await safeAnswerCbQuery(ctx, '✅ تم إعادة تعيين جميع الروابط');
+  await ctx.editMessageText(`✅ *تم إعادة تعيين الروابط*\n\n` +
+    `• تم إعادة تعيين استخدامات جميع الروابط النظامية\n` +
+    `• تم مسح سجلات استخدام المستخدمين\n` +
+    `• الروابط الآن جاهزة للاستخدام مجدداً`, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🔄 تحديث القائمة', 'admin_bonus_links')],
+      [Markup.button.callback('🔙 رجوع', 'admin_points')]
+    ])
+  });
+});
+
+bot.action('admin_top_points', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  await safeAnswerCbQuery(ctx);
+  
+  const topUsers = Object.entries(pointsSystem.points)
+    .sort(([, a], [, b]) => b.balance - a.balance)
+    .slice(0, 10);
+  
+  let message = `🏆 *أعلى 10 رصيد*\n\n`;
+  
+  if (topUsers.length === 0) {
+    message += `لا توجد بيانات عن النقاط.`;
+  } else {
+    topUsers.forEach(([userId, data], index) => {
+      const rank = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+      const name = userMeta[userId]?.first_name || `مستخدم ${userId}`;
+      const username = userMeta[userId]?.username ? `@${userMeta[userId]?.username}` : 'بدون معرف';
+      message += `${rank} ${name} (${username})\n`;
+      message += `   🆔 ${userId}\n`;
+      message += `   💰 ${data.balance} نقطة\n`;
+      message += `   📈 ${data.totalEarned} إجمالي\n\n`;
+    });
+  }
+  
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🔄 تحديث', 'admin_top_points')],
+    [Markup.button.callback('🔙 رجوع', 'admin_points')]
+  ]);
+  
+  await safeEditOrReply(ctx, message, { parse_mode: 'Markdown', ...keyboard });
+});
+
+// ============== [لوحة الأدمن الأساسية] ==============
 bot.command('admin', async (ctx) => {
   if (!isOwner(ctx)) return;
   await renderAdminPanel(ctx);
@@ -528,7 +1102,33 @@ bot.action('admin_panel', async (ctx) => {
   await renderAdminPanel(ctx);
 });
 
-// الإحصائيات التفصيلية
+bot.action('admin_broadcast', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  await safeAnswerCbQuery(ctx);
+
+  pendingBroadcast.set(ownerId, true);
+
+  const text =
+    `📢 *إذاعة للكل*\n\n` +
+    `أرسل الآن نص الرسالة التي تريد إرسالها لكل المستخدمين.\n` +
+    `عدد المستلمين: *${users.length}*\n\n` +
+    `لإلغاء العملية اضغط:`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('❌ إلغاء', 'admin_broadcast_cancel')],
+    [Markup.button.callback('🔙 رجوع للوحة', 'admin_panel')]
+  ]);
+
+  await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('admin_broadcast_cancel', async (ctx) => {
+  if (!isOwner(ctx)) return;
+  pendingBroadcast.delete(ownerId);
+  await safeAnswerCbQuery(ctx, 'تم الإلغاء ✅', { show_alert: false });
+  await renderAdminPanel(ctx);
+});
+
 bot.action('admin_stats', async (ctx) => {
   if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
   await safeAnswerCbQuery(ctx);
@@ -558,35 +1158,6 @@ bot.action('admin_stats', async (ctx) => {
   await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// ===== البث =====
-bot.action('admin_broadcast', async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-  await safeAnswerCbQuery(ctx);
-
-  pendingBroadcast.set(ownerId, true);
-
-  const text =
-    `📢 *إذاعة للكل*\n\n` +
-    `أرسل الآن نص الرسالة التي تريد إرسالها لكل المستخدمين.\n` +
-    `عدد المستلمين: *${users.length}*\n\n` +
-    `لإلغاء العملية اضغط:`;
-
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('❌ إلغاء', 'admin_broadcast_cancel')],
-    [Markup.button.callback('🔙 رجوع للوحة', 'admin_panel')]
-  ]);
-
-  await safeEditOrReply(ctx, text, { parse_mode: 'Markdown', ...keyboard });
-});
-
-bot.action('admin_broadcast_cancel', async (ctx) => {
-  if (!isOwner(ctx)) return;
-  pendingBroadcast.delete(ownerId);
-  await safeAnswerCbQuery(ctx, 'تم الإلغاء ✅', { show_alert: false });
-  await renderAdminPanel(ctx);
-});
-
-// ===== إدارة المستخدمين =====
 bot.action('admin_users', async (ctx) => {
   if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
   await safeAnswerCbQuery(ctx);
@@ -671,188 +1242,10 @@ bot.action('admin_user_action_cancel', async (ctx) => {
   await renderAdminPanel(ctx);
 });
 
-// ===== عرض كل السيرفرات (تجميعي) =====
-function buildAllServersList() {
-  const list = [];
-  for (const uidStr of Object.keys(servers)) {
-    const uid = Number(uidStr);
-    const s = servers[uidStr];
-    if (!s || !s.ip || !s.port) continue;
-
-    const version = s.version || 'غير محدد';
-    const activeForUser = Object.keys(clients).some(k => k.startsWith(uid + '_'));
-    list.push({
-      userId: uid,
-      ip: s.ip,
-      port: s.port,
-      version,
-      active: activeForUser
-    });
-  }
-  return list;
-}
-
-async function showAllServersPage(ctx, page = 1) {
-  const perPage = 10;
-  const list = buildAllServersList();
-  const total = list.length;
-  const totalPages = Math.max(1, Math.ceil(total / perPage));
-  const safePage = Math.min(Math.max(page, 1), totalPages);
-
-  const start = (safePage - 1) * perPage;
-  const slice = list.slice(start, start + perPage);
-
-  let msg = `🖥️ *كل السيرفرات* (صفحة ${safePage}/${totalPages})\n`;
-  msg += `إجمالي: *${total}*\n\n`;
-
-  if (slice.length === 0) {
-    msg += 'لا توجد سيرفرات محفوظة.';
-  } else {
-    slice.forEach((s, idx) => {
-      const icon = s.active ? '🟢' : '🔴';
-      msg += `${start + idx + 1}. ${icon} ${s.ip}:${s.port}\n`;
-      msg += `   📀 ${s.version}\n`;
-      msg += `   👤 ${s.userId}\n`;
-    });
-  }
-
-  const navRow = [];
-  if (safePage > 1) navRow.push(Markup.button.callback('⬅️ السابق', `admin_all_servers:${safePage - 1}`));
-  if (safePage < totalPages) navRow.push(Markup.button.callback('التالي ➡️', `admin_all_servers:${safePage + 1}`));
-
-  const keyboard = Markup.inlineKeyboard([
-    ...(navRow.length ? [navRow] : []),
-    [Markup.button.callback('🔄 تحديث', `admin_all_servers:${safePage}`)],
-    [Markup.button.callback('🔙 رجوع', 'admin_panel')],
-  ]);
-
-  await safeEditOrReply(ctx, msg, { parse_mode: 'Markdown', ...keyboard });
-}
-
-bot.action(/admin_all_servers:(\d+)/, async (ctx) => {
+bot.action('admin_settings', async (ctx) => {
   if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
   await safeAnswerCbQuery(ctx);
-  const page = parseInt(ctx.match[1], 10) || 1;
-  await showAllServersPage(ctx, page);
-});
-
-// ===== إدارة المسؤولين / الإعدادات =====
-
-bot.action('admin_manage_admins', async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-  await safeAnswerCbQuery(ctx);
-
-  const uniqueAdmins = Array.from(new Set(admins)).filter(x => typeof x === 'number' && !Number.isNaN(x));
-  if (!uniqueAdmins.includes(ownerId)) uniqueAdmins.unshift(ownerId);
-
-  let msg = `🔑 *إدارة المسؤولين*\n\n`;
-  msg += `• المالك: *${ownerId}*\n\n`;
-
-  msg += `👑 *قائمة المسؤولين الإضافيين:*\n`;
-  const others = uniqueAdmins.filter(x => x !== ownerId);
-  if (others.length === 0) msg += `— لا يوجد مسؤولين إضافيين.\n`;
-  else msg += others.map((id, i) => `${i + 1}. ${id}`).join('\n') + '\n';
-
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('➕ إضافة مسؤول', 'admin_admins_add'), Markup.button.callback('➖ إزالة مسؤول', 'admin_admins_remove')],
-    [Markup.button.callback('🔙 رجوع', 'admin_panel')]
-  ]);
-
-  await safeEditOrReply(ctx, msg, { parse_mode: 'Markdown', ...keyboard });
-});
-
-bot.action('admin_admins_add', async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-  await safeAnswerCbQuery(ctx);
-
-  pendingAdminAction.set(ownerId, { action: 'add' });
-
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('❌ إلغاء', 'admin_admins_cancel')],
-    [Markup.button.callback('🔙 رجوع', 'admin_manage_admins')]
-  ]);
-
-  await safeEditOrReply(ctx, '➕ *إضافة مسؤول*\n\nأرسل الآن ID المسؤول الذي تريد إضافته.', { parse_mode: 'Markdown', ...keyboard });
-});
-
-bot.action('admin_admins_remove', async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-  await safeAnswerCbQuery(ctx);
-
-  pendingAdminAction.set(ownerId, { action: 'remove' });
-
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('❌ إلغاء', 'admin_admins_cancel')],
-    [Markup.button.callback('🔙 رجوع', 'admin_manage_admins')]
-  ]);
-
-  await safeEditOrReply(ctx, '➖ *إزالة مسؤول*\n\nأرسل الآن ID المسؤول الذي تريد إزالته.', { parse_mode: 'Markdown', ...keyboard });
-});
-
-bot.action('admin_admins_cancel', async (ctx) => {
-  if (!isOwner(ctx)) return;
-  pendingAdminAction.delete(ownerId);
-  await safeAnswerCbQuery(ctx, 'تم الإلغاء ✅');
-  await renderAdminPanel(ctx);
-});
-
-// ===== حالة النظام =====
-bot.action('admin_system', async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-
-  const t0 = Date.now();
-  await safeAnswerCbQuery(ctx);
-
-  const uptimeSec = Math.floor(process.uptime());
-  const uptime = `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m ${uptimeSec % 60}s`;
-
-  const mem = process.memoryUsage();
-  const nodeRss = mem.rss || 0;
-
-  const totalMem = os.totalmem();
-  const freeMem = os.freemem();
-  const load = os.loadavg ? os.loadavg() : [0, 0, 0];
-
-  let cpuText = '';
-  let memText = '';
-
-  if (pidusage) {
-    try {
-      const stats = await pidusage(process.pid);
-      cpuText = `• CPU: *${stats.cpu.toFixed(1)}%*\n`;
-      memText = `• RAM (process): *${formatBytes(stats.memory)}*\n`;
-    } catch (e) {
-      cpuText = '';
-      memText = `• RAM (process): *${formatBytes(nodeRss)}*\n`;
-    }
-  } else {
-    memText = `• RAM (process): *${formatBytes(nodeRss)}*\n`;
-  }
-
-  const ping = Date.now() - t0;
-
-  const msg =
-    `🖥️ *حالة النظام*\n\n` +
-    `⏱️ Ping: *${ping}ms*\n` +
-    `⏳ Uptime: *${uptime}*\n` +
-    cpuText +
-    memText +
-    `• RAM (system): *${formatBytes(totalMem - freeMem)} / ${formatBytes(totalMem)}*\n` +
-    `• Load: *${load.map(x => x.toFixed(2)).join(' / ')}*\n` +
-    `• Node: \`${process.version}\``;
-
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback('🔄 تحديث', 'admin_system')],
-    [Markup.button.callback('🔙 رجوع', 'admin_panel')]
-  ]);
-
-  await safeEditOrReply(ctx, msg, { parse_mode: 'Markdown', ...keyboard });
-});
-
-// ===================== [لوحة الأدمن: الإعدادات + قنوات الاشتراك + قائمة المستخدمين] =====================
-
-// ---- الإعدادات ----
-async function renderSettingsPanel(ctx) {
+  
   const forceSub = !!settings?.forceSubscription;
   const chCount = Array.isArray(subChannels) ? subChannels.length : 0;
 
@@ -869,12 +1262,6 @@ async function renderSettingsPanel(ctx) {
   ]);
 
   await safeEditOrReply(ctx, msg, { parse_mode: 'Markdown', ...keyboard });
-}
-
-bot.action('admin_settings', async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-  await safeAnswerCbQuery(ctx);
-  await renderSettingsPanel(ctx);
 });
 
 bot.action('settings_toggle_force', async (ctx) => {
@@ -882,115 +1269,12 @@ bot.action('settings_toggle_force', async (ctx) => {
   settings.forceSubscription = !settings.forceSubscription;
   saveSettings();
   await safeAnswerCbQuery(ctx, '✅ تم الحفظ');
-  await renderSettingsPanel(ctx);
+  await renderAdminPanel(ctx);
 });
 
-// ---- قائمة جميع المستخدمين (Pagination) ----
-function buildAllUsersList() {
-  const set = new Set(Array.isArray(users) ? users : []);
-  // اجمع أي مستخدم موجود في meta أو servers
-  Object.keys(userMeta || {}).forEach(id => set.add(Number(id)));
-  Object.keys(servers || {}).forEach(id => set.add(Number(id)));
-
-  const list = Array.from(set)
-    .filter(id => typeof id === 'number' && !Number.isNaN(id))
-    .map(id => {
-      const meta = userMeta?.[String(id)] || {};
-      const hasServer = !!(servers?.[String(id)]?.ip || servers?.[id]?.ip);
-      const isBanned = bannedUsers.includes(id);
-      return {
-        id,
-        name: meta.first_name || '',
-        username: meta.username || '',
-        joinedAt: meta.joinedAt || null,
-        hasServer,
-        isBanned
-      };
-    });
-
-  // الأحدث أولاً حسب joinedAt (وإن لم يوجد، حسب ID تنازلياً)
-  list.sort((a, b) => {
-    const da = a.joinedAt ? new Date(a.joinedAt).getTime() : 0;
-    const db = b.joinedAt ? new Date(b.joinedAt).getTime() : 0;
-    if (da !== db) return db - da;
-    return b.id - a.id;
-  });
-
-  return list;
-}
-
-async function showAllUsersPage(ctx, page = 1) {
-  const perPage = 12;
-  const list = buildAllUsersList();
-  const total = list.length;
-  const totalPages = Math.max(1, Math.ceil(total / perPage));
-  const safePage = Math.min(Math.max(page, 1), totalPages);
-
-  const start = (safePage - 1) * perPage;
-  const slice = list.slice(start, start + perPage);
-
-  let msg = `📋 *قائمة جميع المستخدمين* (صفحة ${safePage}/${totalPages})\n`;
-  msg += `إجمالي: *${total}*\n\n`;
-
-  if (slice.length === 0) {
-    msg += 'لا يوجد مستخدمون.';
-  } else {
-    slice.forEach((u, idx) => {
-      const banned = u.isBanned ? '🚫' : '✅';
-      const hasSrv = u.hasServer ? '🌐' : '—';
-      const name = u.name ? ` ${u.name}` : '';
-      const uname = u.username ? ` @${u.username}` : '';
-      msg += `${start + idx + 1}. ${banned} ${hasSrv} *${u.id}*${name}${uname}\n`;
-    });
-  }
-
-  const navRow = [];
-  if (safePage > 1) navRow.push(Markup.button.callback('⬅️ السابق', `admin_all_users:${safePage - 1}`));
-  if (safePage < totalPages) navRow.push(Markup.button.callback('التالي ➡️', `admin_all_users:${safePage + 1}`));
-
-  const keyboard = Markup.inlineKeyboard([
-    ...(navRow.length ? [navRow] : []),
-    [Markup.button.callback('🔄 تحديث', `admin_all_users:${safePage}`)],
-    [Markup.button.callback('👤 إدارة المستخدمين', 'admin_users')],
-    [Markup.button.callback('🔙 رجوع', 'admin_panel')]
-  ]);
-
-  await safeEditOrReply(ctx, msg, { parse_mode: 'Markdown', ...keyboard });
-}
-
-bot.action('admin_all_users', async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-  await safeAnswerCbQuery(ctx);
-  await showAllUsersPage(ctx, 1);
-});
-
-bot.action(/admin_all_users:(\d+)/, async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-  await safeAnswerCbQuery(ctx);
-  const page = parseInt(ctx.match[1], 10) || 1;
-  await showAllUsersPage(ctx, page);
-});
-
-// ---- عرض كل السيرفرات (Fallback بدون رقم صفحة) ----
-bot.action('admin_all_servers', async (ctx) => {
-  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
-  await safeAnswerCbQuery(ctx);
-  await showAllServersPage(ctx, 1);
-});
-
-// ---- إدارة قنوات الاشتراك (Pagination + إضافة + حذف) ----
-function normalizeSubChannels() {
-  if (!Array.isArray(subChannels)) subChannels = [];
-  subChannels = subChannels.filter(ch => ch && (typeof ch.id === 'string' || typeof ch.id === 'number'))
-    .map(ch => ({
-      id: typeof ch.id === 'string' ? ch.id.trim() : ch.id,
-      url: (ch.url || '').trim(),
-      title: (ch.title || '').trim()
-    }));
-}
-
+// ============== [إدارة قنوات الاشتراك] ==============
 async function showSubChannelsPage(ctx, page = 1) {
-  normalizeSubChannels();
+  if (!Array.isArray(subChannels)) subChannels = [];
   const perPage = 5;
   const total = subChannels.length;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
@@ -1001,7 +1285,6 @@ async function showSubChannelsPage(ctx, page = 1) {
 
   let msg = `📌 *إدارة قنوات الاشتراك* (صفحة ${safePage}/${totalPages})\n`;
   msg += `إجمالي القنوات: *${total}*\n\n`;
-  msg += `ملاحظة: التحقق من الاشتراك يحتاج *ID رقمي -100...* أو *@username*.\n\n`;
 
   if (slice.length === 0) {
     msg += 'لا توجد قنوات.\n';
@@ -1019,7 +1302,6 @@ async function showSubChannelsPage(ctx, page = 1) {
   if (safePage > 1) navRow.push(Markup.button.callback('⬅️ السابق', `admin_sub_channels:${safePage - 1}`));
   if (safePage < totalPages) navRow.push(Markup.button.callback('التالي ➡️', `admin_sub_channels:${safePage + 1}`));
 
-  // أزرار حذف لكل قناة في الصفحة الحالية
   const delRows = slice.map((ch, idx) => {
     const globalIndex = start + idx;
     const label = ch.title ? `🗑️ حذف: ${ch.title}` : `🗑️ حذف #${globalIndex + 1}`;
@@ -1031,7 +1313,6 @@ async function showSubChannelsPage(ctx, page = 1) {
     ...delRows,
     ...(navRow.length ? [navRow] : []),
     [Markup.button.callback('🔄 تحديث', `admin_sub_channels:${safePage}`)],
-    [Markup.button.callback('⚙️ الإعدادات', 'admin_settings')],
     [Markup.button.callback('🔙 رجوع', 'admin_panel')]
   ]);
 
@@ -1085,7 +1366,7 @@ bot.action(/sub_del:(\d+):(\d+)/, async (ctx) => {
   if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
   await safeAnswerCbQuery(ctx);
 
-  normalizeSubChannels();
+  if (!Array.isArray(subChannels)) subChannels = [];
   const index = parseInt(ctx.match[1], 10);
   const backPage = parseInt(ctx.match[2], 10) || 1;
 
@@ -1098,918 +1379,954 @@ bot.action(/sub_del:(\d+):(\d+)/, async (ctx) => {
   saveSubChannels();
 
   await safeAnswerCbQuery(ctx, `✅ تم حذف: ${removed?.title || removed?.id || 'القناة'}`);
-  // إعادة عرض الصفحة مع تصحيح الرقم لو نقصت الصفحات
   const totalPages = Math.max(1, Math.ceil(subChannels.length / 5));
   const newPage = Math.min(backPage, totalPages);
   await showSubChannelsPage(ctx, newPage);
 });
 
+// ============== [عرض جميع السيرفرات] ==============
+async function showAllServersPage(ctx, page = 1) {
+  if (!isOwner(ctx)) return;
+  
+  const list = [];
+  for (const uidStr of Object.keys(servers)) {
+    const uid = Number(uidStr);
+    const s = servers[uidStr];
+    if (!s || !s.ip || !s.port) continue;
 
-// ============== [أوامر البوت] ==============
-
-// بداية البوت
-
-bot.start(async (ctx) => {
-  const isSub = await checkSubscription(ctx);
-
-  if (!isSub) {
-    const list = (subChannels || []).map((ch, i) => {
-      const title = ch.title?.trim() || (typeof ch.id === 'string' ? ch.id : `Channel ${i + 1}`);
-      return `• ${title}`;
-    }).join('\n') || '• IBR Channel';
-
-    return ctx.reply(
-      `🔒 للوصول إلى البوت يجب الاشتراك في القنوات التالية:\n${list}\n\nبعد الاشتراك اضغط /start أو زر التحقق`,
-      buildSubscriptionKeyboard()
-    );
+    const version = s.version || 'غير محدد';
+    const activeForUser = Object.keys(clients).some(k => k.startsWith(uid + '_'));
+    list.push({
+      userId: uid,
+      ip: s.ip,
+      port: s.port,
+      version,
+      active: activeForUser
+    });
   }
+  
+  const perPage = 10;
+  const total = list.length;
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const safePage = Math.min(Math.max(page, 1), totalPages);
 
-  const user = ctx.from;
-  const userId = user.id;
+  const start = (safePage - 1) * perPage;
+  const slice = list.slice(start, start + perPage);
 
-  if (!users.includes(userId)) {
-    users.push(userId);
-    saveUsers();
+  let msg = `🖥️ *كل السيرفرات* (صفحة ${safePage}/${totalPages})\n`;
+  msg += `إجمالي: *${total}*\n\n`;
 
-    userMeta[String(userId)] = {
-      first_name: user.first_name || '',
-      username: user.username || '',
-      joinedAt: new Date().toISOString()
-    };
-    saveUserMeta();
-
-    try {
-      await bot.telegram.sendMessage(ownerId,
-        `👤 مستخدم جديد\n` +
-        `الاسم: ${user.first_name}\n` +
-        `المعرف: @${user.username || 'لا يوجد'}\n` +
-        `ID: ${userId}\n` +
-        `المجموع: ${users.length}`
-      );
-    } catch (err) {}
+  if (slice.length === 0) {
+    msg += 'لا توجد سيرفرات محفوظة.';
   } else {
-    if (!userMeta[String(userId)]) {
-      userMeta[String(userId)] = { first_name: user.first_name || '', username: user.username || '', joinedAt: new Date().toISOString() };
-      saveUserMeta();
-    }
+    slice.forEach((s, idx) => {
+      const icon = s.active ? '🟢' : '🔴';
+      msg += `${start + idx + 1}. ${icon} ${s.ip}:${s.port}\n`;
+      msg += `   📀 ${s.version}\n`;
+      msg += `   👤 ${s.userId}\n`;
+    });
   }
 
-  return showMainMenu(ctx);
-});
+  const navRow = [];
+  if (safePage > 1) navRow.push(Markup.button.callback('⬅️ السابق', `admin_all_servers:${safePage - 1}`));
+  if (safePage < totalPages) navRow.push(Markup.button.callback('التالي ➡️', `admin_all_servers:${safePage + 1}`));
 
+  const keyboard = Markup.inlineKeyboard([
+    ...(navRow.length ? [navRow] : []),
+    [Markup.button.callback('🔄 تحديث', `admin_all_servers:${safePage}`)],
+    [Markup.button.callback('🔙 رجوع', 'admin_panel')],
+  ]);
 
-
-// المزيد من الإصدارات
-bot.action('more_versions', (ctx) => {
-  ctx.editMessageText('🎮 اختر إصدار اللعبة:', {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback('1.21.72', 'ver_1.21.72')],
-      [Markup.button.callback('1.21.50', 'ver_1.21.50')],
-      [Markup.button.callback('1.21.0', 'ver_1.21.0')],
-      [Markup.button.callback('1.20.80', 'ver_1.20.80')],
-      [Markup.button.callback('1.20.50', 'ver_1.20.50')],
-      [Markup.button.callback('1.20.0', 'ver_1.20.0')],
-      [Markup.button.callback('1.19.80', 'ver_1.19.80')],
-      [Markup.button.callback('العودة ⬆️', 'back_versions')]
-    ])
-  });
-});
-
-bot.action('back_versions', (ctx) => {
-  ctx.editMessageText('🎮 اختر إصدار اللعبة:', {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback('✨NEW 1.21.131', 'ver_1.21.131')],
-      [Markup.button.callback('🚀 1.21.130', 'ver_1.21.130')],
-      [Markup.button.callback('✅ 1.21.124', 'ver_1.21.124')],
-      [Markup.button.callback('1.21.123', 'ver_1.21.123')],
-      [Markup.button.callback('1.21.120', 'ver_1.21.120')],
-      [Markup.button.callback('1.21.100', 'ver_1.21.100')],
-      [Markup.button.callback('1.21.93', 'ver_1.21.93')],
-      [Markup.button.callback('1.21.84', 'ver_1.21.84')],
-      [Markup.button.callback('1.21.80', 'ver_1.21.80')],
-      [Markup.button.callback('المزيد ⬇️', 'more_versions')]
-    ])
-  });
-});
-
-// زر التحقق من الاشتراك
-
-bot.action('check_sub', async (ctx) => {
-  const isSub = await checkSubscription(ctx);
-
-  if (!isSub) {
-    return ctx.answerCbQuery('❌ لم تشترك بعد!', { show_alert: true });
-  }
-
-  await ctx.answerCbQuery('✅ تم التحقق بنجاح!', { show_alert: true });
-  try { await ctx.deleteMessage(); } catch (e) {}
-  return showMainMenu(ctx);
-});
-
-
-
-// اختيار الإصدار
-bot.action(/ver_(.+)/, (ctx) => {
-  const version = ctx.match[1];
-  const userId = ctx.from.id;
-
-  ctx.answerCbQuery(`✅ تم اختيار ${version}`);
-
-  servers[userId] = servers[userId] || {};
-  servers[userId].version = version;
-  saveServers();
-
-  ctx.reply(`✅ الإصدار: ${version}\n\n📥 أرسل IP السيرفر وPort:\nمثال:\nplay.server.com:19132`);
-});
-
-// ============== [دالة آمنة للمعالجة التلقائية] ==============
-let isProcessing = false;
-
-async function safeAsyncOperation(operation, errorMessage = 'حدث خطأ') {
-  if (isProcessing) {
-    return { success: false, error: 'جاري معالجة طلب آخر' };
-  }
-
-  isProcessing = true;
-  try {
-    return await operation();
-  } catch (error) {
-    console.error(`🚨 خطأ محتوى: ${error.message}`);
-    return { success: false, error: errorMessage };
-  } finally {
-    isProcessing = false;
-  }
+  await safeEditOrReply(ctx, msg, { parse_mode: 'Markdown', ...keyboard });
 }
 
-// استقبال النصوص (IP:PORT + مدخلات لوحة الأدمن)
-bot.on('text', async (ctx) => {
-  const text = ctx.message.text;
-  const userId = ctx.from.id;
+bot.action('admin_all_servers', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  await safeAnswerCbQuery(ctx);
+  await showAllServersPage(ctx, 1);
+});
 
-  if (text.startsWith('/')) return;
+bot.action(/admin_all_servers:(\d+)/, async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  await safeAnswerCbQuery(ctx);
+  const page = parseInt(ctx.match[1], 10) || 1;
+  await showAllServersPage(ctx, page);
+});
 
-  // ===== أولوية: أوضاع لوحة الأدمن (للـ owner فقط) =====
-  if (userId === ownerId) {
-    // 1) بث
-    if (pendingBroadcast.get(ownerId)) {
-      pendingBroadcast.delete(ownerId);
+// ============== [عرض جميع المستخدمين] ==============
+async function showAllUsersPage(ctx, page = 1) {
+  if (!isOwner(ctx)) return;
+  
+  const set = new Set(Array.isArray(users) ? users : []);
+  Object.keys(userMeta || {}).forEach(id => set.add(Number(id)));
+  Object.keys(servers || {}).forEach(id => set.add(Number(id)));
 
-      const message = text.trim();
-      if (!message) {
-        return ctx.reply('❌ الرسالة فارغة.');
+  const list = Array.from(set)
+    .filter(id => typeof id === 'number' && !Number.isNaN(id))
+    .map(id => {
+      const meta = userMeta?.[String(id)] || {};
+      const hasServer = !!(servers?.[String(id)]?.ip || servers?.[id]?.ip);
+      const isBanned = bannedUsers.includes(id);
+      const userPoints = pointsSystem.points[id] || { balance: 0 };
+      return {
+        id,
+        name: meta.first_name || '',
+        username: meta.username || '',
+        joinedAt: meta.joinedAt || null,
+        hasServer,
+        isBanned,
+        points: userPoints.balance || 0
+      };
+    });
+
+  list.sort((a, b) => {
+    const da = a.joinedAt ? new Date(a.joinedAt).getTime() : 0;
+    const db = b.joinedAt ? new Date(b.joinedAt).getTime() : 0;
+    if (da !== db) return db - da;
+    return b.id - a.id;
+  });
+
+  const perPage = 12;
+  const total = list.length;
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const safePage = Math.min(Math.max(page, 1), totalPages);
+
+  const start = (safePage - 1) * perPage;
+  const slice = list.slice(start, start + perPage);
+
+  let msg = `📋 *قائمة جميع المستخدمين* (صفحة ${safePage}/${totalPages})\n`;
+  msg += `إجمالي: *${total}*\n\n`;
+
+  if (slice.length === 0) {
+    msg += 'لا يوجد مستخدمون.';
+  } else {
+    slice.forEach((u, idx) => {
+      const banned = u.isBanned ? '🚫' : '✅';
+      const hasSrv = u.hasServer ? '🌐' : '—';
+      const name = u.name ? ` ${u.name}` : '';
+      const uname = u.username ? ` @${u.username}` : '';
+      msg += `${start + idx + 1}. ${banned} ${hasSrv} *${u.id}*${name}${uname}\n`;
+      msg += `   💰 ${u.points} نقطة\n`;
+    });
+  }
+
+  const navRow = [];
+  if (safePage > 1) navRow.push(Markup.button.callback('⬅️ السابق', `admin_all_users:${safePage - 1}`));
+  if (safePage < totalPages) navRow.push(Markup.button.callback('التالي ➡️', `admin_all_users:${safePage + 1}`));
+
+  const keyboard = Markup.inlineKeyboard([
+    ...(navRow.length ? [navRow] : []),
+    [Markup.button.callback('🔄 تحديث', `admin_all_users:${safePage}`)],
+    [Markup.button.callback('👤 إدارة المستخدمين', 'admin_users')],
+    [Markup.button.callback('🔙 رجوع', 'admin_panel')]
+  ]);
+
+  await safeEditOrReply(ctx, msg, { parse_mode: 'Markdown', ...keyboard });
+}
+
+bot.action('admin_all_users', async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  await safeAnswerCbQuery(ctx);
+  await showAllUsersPage(ctx, 1);
+});
+
+bot.action(/admin_all_users:(\d+)/, async (ctx) => {
+  if (!isOwner(ctx)) return safeAnswerCbQuery(ctx, '❌ غير مصرح', { show_alert: true });
+  await safeAnswerCbQuery(ctx);
+  const page = parseInt(ctx.match[1], 10) || 1;
+  await showAllUsersPage(ctx, page);
+});
+
+// ============== [بداية البوت مع نظام النقاط] ==============
+bot.start(async (ctx) => {
+  try {
+    const args = ctx.message.text.split(' ');
+    const referralCode = args.length > 1 ? args[1] : null;
+    const userId = ctx.from.id;
+    
+    const isSub = await checkSubscription(ctx);
+
+    if (!isSub) {
+      const list = (subChannels || []).map((ch, i) => {
+        const title = ch.title?.trim() || (typeof ch.id === 'string' ? ch.id : `Channel ${i + 1}`);
+        return `• ${title}`;
+      }).join('\n') || '• IBR Channel';
+
+      return ctx.reply(
+        `🔒 للوصول إلى البوت يجب الاشتراك في القنوات التالية:\n${list}\n\nبعد الاشتراك اضغط /start أو زر التحقق`,
+        buildSubscriptionKeyboard()
+      );
+    }
+
+    const user = ctx.from;
+
+    if (!users.includes(userId)) {
+      users.push(userId);
+      saveUsers();
+
+      userMeta[String(userId)] = {
+        first_name: user.first_name || '',
+        username: user.username || '',
+        joinedAt: new Date().toISOString()
+      };
+      saveUserMeta();
+
+      try {
+        await bot.telegram.sendMessage(ownerId,
+          `👤 مستخدم جديد\n` +
+          `الاسم: ${user.first_name}\n` +
+          `المعرف: @${user.username || 'لا يوجد'}\n` +
+          `ID: ${userId}\n` +
+          `المجموع: ${users.length}`
+        );
+      } catch (err) {
+        console.log('❌ خطأ في إرسال إشعار للمالك:', err.message);
       }
-
-      await ctx.reply(`📢 إرسال لـ ${users.length} مستخدم...`);
-
-      let sent = 0;
-      for (const uid of users) {
-        try {
-          await bot.telegram.sendMessage(uid, `📢 إشعار:\n\n${message}`);
-          sent++;
-        } catch (err) { /* ignore */ }
+    } else {
+      if (!userMeta[String(userId)]) {
+        userMeta[String(userId)] = { 
+          first_name: user.first_name || '', 
+          username: user.username || '', 
+          joinedAt: new Date().toISOString() 
+        };
+        saveUserMeta();
       }
+    }
 
-      await ctx.reply(`✅ تم الإرسال لـ ${sent}/${users.length} مستخدم`);
+    // معالجة روابط المكافآت
+    if (referralCode) {
+      const link = checkBonusLink(userId, referralCode);
+      if (link) {
+        const userPoints = getUserPoints(userId);
+        
+        if (link.uses < link.maxUses) {
+          useBonusLink(userId, referralCode);
+          addPoints(userId, link.points, 'referral');
+          
+          await ctx.reply(`🎉 *مبروك!*\n\nلقد حصلت على ${link.points} نقطة مجانية!\n💰 رصيدك الحالي: ${getUserPoints(userId).balance} نقطة`, {
+            parse_mode: 'Markdown'
+          });
+        } else {
+          await ctx.reply(`⚠️ *عذراً*\n\nهذا الرابط استنفد جميع استخداماته أو قمت باستخدامه مسبقاً.`, {
+            parse_mode: 'Markdown'
+          });
+        }
+      } else {
+        await ctx.reply(`❌ *رابط غير صالح*\n\nهذا الرابط غير موجود أو تم استخدامه من قبل.`, {
+          parse_mode: 'Markdown'
+        });
+      }
+    }
+
+    return showMainMenu(ctx);
+  } catch (error) {
+    console.log('❌ خطأ في أمر /start:', error.message);
+    await ctx.reply('❌ حدث خطأ في معالجة طلبك. يرجى المحاولة مرة أخرى.');
+  }
+});
+
+// ============== [زر التحقق من الاشتراك] ==============
+bot.action('check_sub', async (ctx) => {
+  try {
+    const isSub = await checkSubscription(ctx);
+
+    if (!isSub) {
+      await ctx.answerCbQuery('❌ لم تشترك بعد!', { show_alert: true });
       return;
     }
 
-    // 2) إدارة مستخدم (حظر/رفع/معلومات)
-    const ua = pendingUserAction.get(ownerId);
-    if (ua) {
-      const targetId = parseInt(text.trim(), 10);
-      if (Number.isNaN(targetId)) {
-        return ctx.reply('❌ ID غير صحيح. أرسل رقم فقط.');
-      }
+    await ctx.answerCbQuery('✅ تم التحقق بنجاح!', { show_alert: true });
+    
+    // محاولة حذف الرسالة القديمة
+    try { 
+      await ctx.deleteMessage(); 
+    } catch (e) {
+      // تجاهل الخطأ إذا كانت الرسالة غير موجودة
+    }
+    
+    // إرسال رسالة جديدة
+    await showMainMenu(ctx);
+  } catch (error) {
+    console.log('❌ خطأ في check_sub:', error.message);
+    try {
+      await ctx.answerCbQuery('❌ حدث خطأ، يرجى المحاولة مرة أخرى', { show_alert: true });
+    } catch (e) {}
+  }
+});
 
-      pendingUserAction.delete(ownerId);
+// ============== [استقبال النصوص] ==============
+bot.on('text', async (ctx) => {
+  try {
+    const text = ctx.message.text;
+    const userId = ctx.from.id;
 
-      if (ua.action === 'ban') {
-        if (!bannedUsers.includes(targetId)) {
-          bannedUsers.push(targetId);
-          saveBans();
-        }
+    if (text.startsWith('/')) return;
 
-        // إيقاف اتصالاته
-        Object.keys(clients).forEach(key => {
-          if (key.startsWith(targetId + '_')) {
-            try { clients[key].end(); } catch (e) {}
-            delete clients[key];
+    // ===== معالجة النقاط من لوحة الأدمن =====
+    if (userId === ownerId) {
+      const pa = pendingPointsAction.get(ownerId);
+      if (pa) {
+        pendingPointsAction.delete(ownerId);
+        
+        if (pa.action === 'create_link') {
+          const parts = text.trim().split(' ');
+          if (parts.length < 2) {
+            return ctx.reply('❌ صيغة غير صحيحة. استخدم: اسم_الرابط نقاط عدد_الاستخدامات');
           }
-        });
+          
+          const linkName = parts[0];
+          const points = parseInt(parts[1], 10) || 100;
+          const maxUses = parseInt(parts[2], 10) || 1;
+          
+          if (pointsSystem.bonusLinks[linkName]) {
+            return ctx.reply('❌ هذا الرابط موجود بالفعل!');
+          }
+          
+          pointsSystem.bonusLinks[linkName] = {
+            points: points,
+            uses: 0,
+            maxUses: maxUses,
+            expiry: null,
+            creator: 'admin'
+          };
+          
+          savePointsSystem();
+          
+          return ctx.reply(`✅ *تم إنشاء رابط جديد*\n\n` +
+            `🔗 الرابط: https://t.me/IBR_Atrenos_bot?start=${linkName}\n` +
+            `🎯 النقاط: ${points}\n` +
+            `📊 الحد الأقصى: ${maxUses} استخدام\n\n` +
+            `شارك هذا الرابط مع المستخدمين!`, {
+            parse_mode: 'Markdown'
+          });
+        }
+        
+        if (pa.action === 'delete_link') {
+          const linkName = text.trim();
+          if (!pointsSystem.bonusLinks[linkName]) {
+            return ctx.reply('❌ هذا الرابط غير موجود!');
+          }
+          
+          delete pointsSystem.bonusLinks[linkName];
+          savePointsSystem();
+          
+          return ctx.reply(`✅ تم حذف الرابط: ${linkName}`);
+        }
+        
+        const parts = text.trim().split(' ');
+        if (parts.length !== 2) {
+          return ctx.reply('❌ صيغة غير صحيحة. استخدم: ID عدد_النقاط');
+        }
+        
+        const targetId = parseInt(parts[0], 10);
+        const points = parseInt(parts[1], 10);
+        
+        if (Number.isNaN(targetId) || Number.isNaN(points)) {
+          return ctx.reply('❌ القيم يجب أن تكون أرقاماً');
+        }
+        
+        if (pa.action === 'add') {
+          addPoints(targetId, points, 'admin_add');
+          const newBalance = getUserPoints(targetId).balance;
+          return ctx.reply(`✅ تم إضافة ${points} نقطة للمستخدم ${targetId}\n💰 الرصيد الجديد: ${newBalance}`);
+        } else if (pa.action === 'remove') {
+          const userPoints = getUserPoints(targetId);
+          if (userPoints.balance >= points) {
+            deductPoints(targetId, points);
+            const newBalance = getUserPoints(targetId).balance;
+            return ctx.reply(`✅ تم خصم ${points} نقطة من المستخدم ${targetId}\n💰 الرصيد الجديد: ${newBalance}`);
+          } else {
+            return ctx.reply(`❌ رصيد المستخدم ${targetId} غير كافي: ${userPoints.balance} فقط`);
+          }
+        }
+      }
+      
+      // ===== البث =====
+      if (pendingBroadcast.get(ownerId)) {
+        pendingBroadcast.delete(ownerId);
 
-        return ctx.reply(`✅ تم حظر المستخدم: ${targetId}`);
+        const message = text.trim();
+        if (!message) {
+          return ctx.reply('❌ الرسالة فارغة.');
+        }
+
+        await ctx.reply(`📢 إرسال لـ ${users.length} مستخدم...`);
+
+        let sent = 0;
+        for (const uid of users) {
+          try {
+            await bot.telegram.sendMessage(uid, `📢 إشعار:\n\n${message}`);
+            sent++;
+          } catch (err) {
+            console.log(`❌ خطأ في إرسال للمستخدم ${uid}:`, err.message);
+          }
+        }
+
+        await ctx.reply(`✅ تم الإرسال لـ ${sent}/${users.length} مستخدم`);
+        return;
       }
 
-      if (ua.action === 'unban') {
-        bannedUsers = bannedUsers.filter(x => x !== targetId);
-        saveBans();
-        return ctx.reply(`✅ تم رفع الحظر عن: ${targetId}`);
+      // ===== إدارة مستخدم =====
+      const ua = pendingUserAction.get(ownerId);
+      if (ua) {
+        const targetId = parseInt(text.trim(), 10);
+        if (Number.isNaN(targetId)) {
+          return ctx.reply('❌ ID غير صحيح. أرسل رقم فقط.');
+        }
+
+        pendingUserAction.delete(ownerId);
+
+        if (ua.action === 'ban') {
+          if (!bannedUsers.includes(targetId)) {
+            bannedUsers.push(targetId);
+            saveBans();
+          }
+
+          Object.keys(clients).forEach(key => {
+            if (key.startsWith(targetId + '_')) {
+              try { clients[key].end(); } catch (e) {}
+              delete clients[key];
+            }
+          });
+
+          removeActiveBot(targetId);
+          
+          return ctx.reply(`✅ تم حظر المستخدم: ${targetId}`);
+        }
+
+        if (ua.action === 'unban') {
+          bannedUsers = bannedUsers.filter(x => x !== targetId);
+          saveBans();
+          return ctx.reply(`✅ تم رفع الحظر عن: ${targetId}`);
+        }
+
+        if (ua.action === 'info') {
+          const meta = userMeta[String(targetId)] || {};
+          const s = servers[String(targetId)] || servers[targetId] || null;
+          const activeForUser = Object.keys(clients).filter(k => k.startsWith(targetId + '_'));
+          const userPoints = getUserPoints(targetId);
+          const activeBot = checkActiveBot(targetId);
+
+          const name = meta.first_name || 'بدون اسم';
+          const username = meta.username ? `@${meta.username}` : 'بدون معرف';
+          const joined = meta.joinedAt ? new Date(meta.joinedAt).toLocaleString() : 'غير معروف';
+          const banned = bannedUsers.includes(targetId) ? 'نعم 🚫' : 'لا ✅';
+
+          let msg = `ℹ️ *معلومات المستخدم*\n\n`;
+          msg += `🆔 ID: *${targetId}*\n`;
+          msg += `👤 الاسم: *${name}*\n`;
+          msg += `🔗 المعرف: *${username}*\n`;
+          msg += `📅 الانضمام: *${joined}*\n`;
+          msg += `🚫 محظور: *${banned}*\n`;
+          msg += `💰 النقاط: *${userPoints.balance}*\n`;
+          msg += `📈 الإجمالي: *${userPoints.totalEarned}*\n\n`;
+
+          if (s && s.ip) {
+            msg += `🌐 السيرفر:\n`;
+            msg += `• ${s.ip}:${s.port}\n`;
+            msg += `• إصدار: ${s.version || 'غير محدد'}\n\n`;
+          } else {
+            msg += `🌐 السيرفر: لا يوجد\n\n`;
+          }
+
+          msg += `🤖 اتصالات نشطة: *${activeForUser.length}*\n`;
+          if (activeBot) {
+            msg += `⏳ بوت نشط: نعم (${activeBot.remainingHours} ساعة متبقية)\n`;
+          } else {
+            msg += `⏳ بوت نشط: لا\n`;
+          }
+
+          return ctx.reply(msg, { parse_mode: 'Markdown' });
+        }
       }
+      
+      // ===== إضافة قناة اشتراك =====
+      const sa = pendingSubAction.get(ownerId);
+      if (sa) {
+        pendingSubAction.delete(ownerId);
 
-      if (ua.action === 'info') {
-        const meta = userMeta[String(targetId)] || {};
-        const s = servers[String(targetId)] || servers[targetId] || null;
-        const activeForUser = Object.keys(clients).filter(k => k.startsWith(targetId + '_'));
+        const raw = text.trim();
+        const parts = raw.split('|').map(x => x.trim()).filter(Boolean);
+        if (parts.length < 1) return ctx.reply('❌ صيغة غير صحيحة.');
 
-        const name = meta.first_name || 'بدون اسم';
-        const username = meta.username ? `@${meta.username}` : 'بدون معرف';
-        const joined = meta.joinedAt ? new Date(meta.joinedAt).toLocaleString() : 'غير معروف';
-        const banned = bannedUsers.includes(targetId) ? 'نعم 🚫' : 'لا ✅';
+        let idPart = parts[0];
+        let urlPart = parts[1] || '';
+        let titlePart = parts[2] || '';
 
-        let msg = `ℹ️ *معلومات المستخدم*\n\n`;
-        msg += `🆔 ID: *${targetId}*\n`;
-        msg += `👤 الاسم: *${name}*\n`;
-        msg += `🔗 المعرف: *${username}*\n`;
-        msg += `📅 الانضمام: *${joined}*\n`;
-        msg += `🚫 محظور: *${banned}*\n\n`;
-
-        if (s && s.ip) {
-          msg += `🌐 السيرفر:\n`;
-          msg += `• ${s.ip}:${s.port}\n`;
-          msg += `• إصدار: ${s.version || 'غير محدد'}\n\n`;
+        let idVal = idPart;
+        if (/^-?\d+$/.test(idPart)) {
+          idVal = parseInt(idPart, 10);
         } else {
-          msg += `🌐 السيرفر: لا يوجد\n\n`;
+          if (!idPart.startsWith('@') && /^[A-Za-z0-9_]{5,}$/.test(idPart)) idVal = '@' + idPart;
         }
 
-        msg += `🤖 اتصالات نشطة: *${activeForUser.length}*\n`;
-        if (activeForUser.length) {
-          msg += activeForUser.map(k => `• ${k}`).join('\n');
+        if (!urlPart && typeof idVal === 'string' && idVal.startsWith('@')) {
+          urlPart = `https://t.me/${idVal.replace('@','')}`;
         }
 
-        return ctx.reply(msg, { parse_mode: 'Markdown' });
+        if (!Array.isArray(subChannels)) subChannels = [];
+        const exists = subChannels.some(ch => String(ch.id) === String(idVal));
+        if (exists) return ctx.reply('⚠️ هذه القناة موجودة بالفعل.');
+
+        subChannels.push({ id: idVal, url: urlPart, title: titlePart });
+        saveSubChannels();
+
+        return ctx.reply('✅ تم إضافة قناة الاشتراك بنجاح.');
       }
     }
+    
+    // ===== النظام الأساسي للبوت (IP:PORT) =====
+    if (text.includes(':')) {
+      const parts = text.split(':');
+      if (parts.length === 2) {
+        const ip = parts[0].trim();
+        const port = parseInt(parts[1].trim(), 10);
 
-    // 3) إدارة مسؤولين
-    const aa = pendingAdminAction.get(ownerId);
-    if (aa) {
-      const targetId = parseInt(text.trim(), 10);
-      if (Number.isNaN(targetId)) {
-        return ctx.reply('❌ ID غير صحيح. أرسل رقم فقط.');
-      }
+        if (!isNaN(port)) {
+          servers[userId] = servers[userId] || {};
+          servers[userId].ip = ip;
+          servers[userId].port = port;
+          saveServers();
 
-      pendingAdminAction.delete(ownerId);
+          const version = servers[userId].version || '1.21.124';
+          const userPoints = getUserPoints(userId);
+          const activeBot = checkActiveBot(userId);
+          
+          let pointsInfo = `💰 نقاطك: ${userPoints.balance}`;
+          if (activeBot) {
+            pointsInfo += ` | ⏳ بوت نشط (${activeBot.remainingHours} ساعة متبقية)`;
+          } else if (userPoints.balance < 100) {
+            pointsInfo += ` | 💸 تحتاج ${100 - userPoints.balance} نقطة للتشغيل`;
+          } else {
+            pointsInfo += ` | ✅ يمكنك التشغيل`;
+          }
 
-      if (aa.action === 'add') {
-        if (!admins.includes(targetId)) admins.push(targetId);
-        // تأكد عدم حذف المالك
-        if (!admins.includes(ownerId)) admins.unshift(ownerId);
-        saveAdmins();
-        return ctx.reply(`✅ تم إضافة المسؤول: ${targetId}`);
-      }
-
-      if (aa.action === 'remove') {
-        if (targetId === ownerId) return ctx.reply('❌ لا يمكن إزالة المالك.');
-        admins = admins.filter(x => x !== targetId);
-        if (!admins.includes(ownerId)) admins.unshift(ownerId);
-        saveAdmins();
-        return ctx.reply(`✅ تم إزالة المسؤول: ${targetId}`);
-      }
-    }
-  }
-
-  
-// ===== أوضاع إضافية للمالك: إدارة قنوات الاشتراك =====
-if (userId === ownerId) {
-  const sa = pendingSubAction.get(ownerId);
-  if (sa) {
-    pendingSubAction.delete(ownerId);
-
-    const raw = text.trim();
-    const parts = raw.split('|').map(x => x.trim()).filter(Boolean);
-    if (parts.length < 1) return ctx.reply('❌ صيغة غير صحيحة.');
-
-    let idPart = parts[0];
-    let urlPart = parts[1] || '';
-    let titlePart = parts[2] || '';
-
-    // id: رقم أو @username
-    let idVal = idPart;
-    if (/^-?\d+$/.test(idPart)) {
-      idVal = parseInt(idPart, 10);
-    } else {
-      if (!idPart.startsWith('@') && /^[A-Za-z0-9_]{5,}$/.test(idPart)) idVal = '@' + idPart;
-    }
-
-    // إذا @username ولم يُرسل رابط، اصنعه تلقائياً
-    if (!urlPart && typeof idVal === 'string' && idVal.startsWith('@')) {
-      urlPart = `https://t.me/${idVal.replace('@','')}`;
-    }
-
-    if (!urlPart) {
-      return ctx.reply('❌ يجب توفير رابط للقناة (خصوصاً للقنوات الخاصة).');
-    }
-
-    if (!Array.isArray(subChannels)) subChannels = [];
-    const exists = subChannels.some(ch => String(ch.id) === String(idVal));
-    if (exists) return ctx.reply('⚠️ هذه القناة موجودة بالفعل.');
-
-    subChannels.push({ id: idVal, url: urlPart, title: titlePart });
-    saveSubChannels();
-
-    return ctx.reply('✅ تم إضافة قناة الاشتراك بنجاح.');
-  }
-}
-
-// ===== النظام الأساسي للبوت (IP:PORT) =====
-  if (text.includes(':')) {
-    const parts = text.split(':');
-    if (parts.length === 2) {
-      const ip = parts[0].trim();
-      const port = parseInt(parts[1].trim(), 10);
-
-      if (!isNaN(port)) {
-        servers[userId] = servers[userId] || {};
-        servers[userId].ip = ip;
-        servers[userId].port = port;
-        saveServers();
-
-        const version = servers[userId].version || '1.21.124';
-
-        ctx.reply(
-          `✅ تم حفظ السيرفر!\n` +
-          `🌐 IP: ${ip}\n` +
-          `🔌 Port: ${port}\n` +
-          `📀 الإصدار: ${version}`,
-          Markup.inlineKeyboard([
-            [Markup.button.callback('▶️ تشغيل البوت', 'run_bot')],
-            [Markup.button.callback('➕ إضافة بوت', 'add_bot')],
-            [Markup.button.callback('🔧 تشغيل ذكي', 'run_smart')],
-            [Markup.button.callback('🛑 إيقاف البوت', 'stop_bot')],
-            [Markup.button.callback('🗑️ حذف السيرفر', 'del_server')],
-            [Markup.button.url('تفاعل في قناة البوت والا يتم حظرك نهائيا🚫 ', 'https://t.me/+c7sbwOViyhNmYzAy')]
-          ])
-        );
-      } else {
-        ctx.reply('❌ Port يجب أن يكون رقم!');
+          ctx.reply(
+            `✅ تم حفظ السيرفر!\n` +
+            `🌐 IP: ${ip}\n` +
+            `🔌 Port: ${port}\n` +
+            `📀 الإصدار: ${version}\n` +
+            `${pointsInfo}`,
+            Markup.inlineKeyboard([
+              [Markup.button.callback('▶️ تشغيل البوت (100 نقطة)', 'run_bot_with_check')],
+              [Markup.button.callback('🔧 تشغيل ذكي (100 نقطة)', 'run_smart_with_check')],
+              [Markup.button.callback('🛑 إيقاف البوت', 'stop_bot')],
+              [Markup.button.callback('🗑️ حذف السيرفر', 'del_server')],
+              [Markup.button.url('📢 قناة البوت للروابط', 'https://t.me/+c7sbwOViyhNmYzAy')],
+              [Markup.button.callback('💰 نقاطي', 'my_points_stats')]
+            ])
+          );
+        } else {
+          ctx.reply('❌ Port يجب أن يكون رقم!');
+        }
       }
     }
+  } catch (error) {
+    console.log('❌ خطأ في معالجة النص:', error.message);
   }
 });
 
-// تشغيل البوت الذكي (آمن)
-bot.action('run_smart', async (ctx) => {
-  const userId = ctx.from.id;
+// ============== [أزرار التشغيل مع التحقق من النقاط] ==============
+bot.action('run_bot_with_check', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    
+    const check = canStartBot(userId);
+    
+    if (!check.canStart) {
+      return safeAnswerCbQuery(ctx, check.reason, { show_alert: true });
+    }
+    
+    if (!servers[userId] || !servers[userId].ip) {
+      return safeAnswerCbQuery(ctx, '❌ أضف السيرفر أولاً!', { show_alert: true });
+    }
 
-  if (!servers[userId] || !servers[userId].ip) {
-    return ctx.answerCbQuery('❌ أضف السيرفر أولاً!', { show_alert: true });
-  }
+    const { ip, port, version = '1.21.124' } = servers[userId];
+    const protocol = PROTOCOL_MAP[version] || 860;
 
-  const { ip, port, version = '1.21.124' } = servers[userId];
-
-  ctx.answerCbQuery('🤖 جاري التشغيل الذكي...');
-
-  ctx.reply(`🔍 بدء الاتصال الذكي:\n${ip}:${port}\nالإصدار المطلوب: ${version}`)
-    .catch(() => {});
-
-  setTimeout(async () => {
+    await safeAnswerCbQuery(ctx, '🚀 جاري التشغيل...');
+    
+    const deducted = deductPoints(userId, 100);
+    if (!deducted) {
+      return safeAnswerCbQuery(ctx, '❌ خطأ في خصم النقاط!', { show_alert: true });
+    }
+    
+    createActiveBot(userId, 1);
+    
     try {
-      const result = await smartConnect(ip, port, version, userId);
+      const client = createClient({
+        host: ip,
+        port: port,
+        username: 'IBR_Bot',
+        version: version,
+        offline: true,
+        connectTimeout: 15000,
+        protocolVersion: protocol,
+        skipPing: true
+      });
 
-      if (result.success) {
-        const clientKey = `${userId}_main`;
-        clients[clientKey] = result.client;
+      const clientKey = `${userId}_main`;
+      clients[clientKey] = client;
 
-        ctx.reply(result.message).catch(() => {});
-
-        result.client.on('join', () => {
-          bot.telegram.sendMessage(userId,
-            `🔥 تم دخول البوت!\n` +
-            `▫️ الإصدار المستخدم: ${result.versionUsed}\n` +
-            `▫️ البروتوكول: ${result.protocolUsed}\n` +
-            `▫️ الحالة: ${result.versionUsed === result.requestedVersion ? 'مباشر' : 'بديل'}`
-          ).catch(() => {});
-        });
-
-        result.client.on('disconnect', (reason) => {
-          bot.telegram.sendMessage(userId, `❌ تم الفصل: ${reason}`).catch(() => {});
-          delete clients[clientKey];
-        });
-
-        result.client.on('error', (err) => {
-          bot.telegram.sendMessage(userId, `⚠️ خطأ: ${String(err.message).substring(0, 100)}`).catch(() => {});
-          delete clients[clientKey];
-        });
-
-      } else {
-        ctx.reply(
-          `❌ فشل الاتصال\n\n` +
-          `خطأ: ${result.error}\n\n` +
-          `💡 جرب:\n` +
-          `1. تحقق من تشغيل السيرفر\n` +
-          `2. جرب إصداراً مختلفاً\n` +
-          `3. استخدم الزر "▶️ تشغيل البوت"`
+      client.on('join', () => {
+        bot.telegram.sendMessage(userId, 
+          `🔥 *تم تشغيل البوت بنجاح!*\n\n` +
+          `⏰ المدة: 6 ساعات\n` +
+          `💰 تم خصم 100 نقطة\n` +
+          `🏦 الرصيد الجديد: ${getUserPoints(userId).balance}\n\n` +
+          `⚠️ البوت سيتوقف تلقائياً بعد 6 ساعات`,
+          { parse_mode: 'Markdown' }
         ).catch(() => {});
-      }
+      });
 
-    } catch (error) {
-      console.error('🔥 خطأ محتوى في run_smart:', error.message);
-    }
-  }, 100);
-});
-
-// ============== [نظام حماية من التوقف] ==============
-process.on('uncaughtException', (error) => {
-  console.error(`🚨 خطأ غير متوقع (محتوى): ${error.message}`);
-  console.error('💡 البوت يستمر بالعمل...');
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('🚨 وعد مرفوض غير معالج (محتوى):', reason);
-});
-
-// أمر مراقبة الحالة (قديم - يبقى كما هو)
-bot.command('status', (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  const stats = `📊 حالة البوت:\n` +
-    `👥 المستخدمين: ${users.length}\n` +
-    `🌐 السيرفرات: ${Object.keys(servers).length}\n` +
-    `🤖 اتصالات: ${Object.keys(clients).length}\n` +
-    `🔄 معالجة: ${isProcessing ? 'نعم' : 'لا'}\n` +
-    `✅ الحالة: نشط`;
-
-  ctx.reply(stats);
-});
-
-// عرض جميع المستخدمين (قديم - يبقى كما هو)
-bot.command('users', (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  const userList = users.slice(0, 50).map((id, index) =>
-    `${index + 1}. ID: ${id}`
-  ).join('\n');
-
-  ctx.reply(
-    `👥 المستخدمين (${users.length}):\n\n${userList}\n\n` +
-    `📊 أول 50 مستخدم من أصل ${users.length}`
-  );
-});
-
-// حذف مستخدم (قديم - يبقى كما هو)
-bot.command('remove', (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  const args = ctx.message.text.split(' ');
-  if (args.length < 2) {
-    return ctx.reply('❌ استخدم: /remove [رقم المستخدم]');
-  }
-
-  const userId = parseInt(args[1], 10);
-  if (isNaN(userId)) {
-    return ctx.reply('❌ رقم المستخدم يجب أن يكون رقماً');
-  }
-
-  const userIndex = users.indexOf(userId);
-  if (userIndex !== -1) {
-    users.splice(userIndex, 1);
-  }
-
-  if (servers[userId]) {
-    delete servers[userId];
-  }
-
-  Object.keys(clients).forEach(key => {
-    if (key.startsWith(userId + '_')) {
-      try {
-        clients[key].end();
-      } catch (err) {}
-      delete clients[key];
-    }
-  });
-
-  delete userMeta[String(userId)];
-  bannedUsers = bannedUsers.filter(x => x !== userId);
-
-  saveUsers();
-  saveServers();
-  saveUserMeta();
-  saveBans();
-
-  ctx.reply(`✅ تم حذف المستخدم ${userId} وبياناته`);
-});
-
-// عرض السيرفرات المحفوظة (قديم - يبقى كما هو)
-bot.command('servers', (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  let serverList = '';
-  let count = 0;
-
-  for (const uid in servers) {
-    if (servers[uid]?.ip) {
-      count++;
-      serverList += `${count}. ${servers[uid].ip}:${servers[uid].port} (الإصدار: ${servers[uid].version || 'غير محدد'})\n`;
-
-      if (count >= 20) {
-        serverList += '... والمزيد\n';
-        break;
-      }
-    }
-  }
-
-  ctx.reply(
-    `🌐 السيرفرات المحفوظة (${Object.keys(servers).length}):\n\n${serverList || 'لا توجد سيرفرات'}\n\n` +
-    `📊 عرض أول 20 سيرفر`
-  );
-});
-
-// إعادة التشغيل
-bot.command('restart', (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  ctx.reply('🔄 جاري إعادة التشغيل...');
-
-  Object.keys(clients).forEach(key => {
-    try {
-      clients[key].end();
-    } catch (err) {}
-  });
-
-  setTimeout(() => {
-    console.log('🔄 إعادة التشغيل عن بعد بواسطة المالك');
-    process.exit(0);
-  }, 2000);
-});
-
-// نسخ احتياطي
-bot.command('backup', (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  try {
-    const backupData = {
-      users: users,
-      servers: servers,
-      timestamp: new Date().toISOString(),
-      count: {
-        users: users.length,
-        servers: Object.keys(servers).length
-      }
-    };
-
-    JSON.stringify(backupData, null, 2);
-
-    ctx.reply(
-      `💾 النسخ الاحتياطي:\n\n` +
-      `👥 المستخدمين: ${users.length}\n` +
-      `🌐 السيرفرات: ${Object.keys(servers).length}\n` +
-      `⏰ الوقت: ${new Date().toLocaleString()}\n\n` +
-      `📋 البيانات جاهزة للنسخ`
-    );
-
-  } catch (error) {
-    ctx.reply(`❌ خطأ في النسخ الاحتياطي: ${error.message}`);
-  }
-});
-
-// تشغيل البوت العادي
-bot.action('run_bot', async (ctx) => {
-  const userId = ctx.from.id;
-
-  if (!servers[userId] || !servers[userId].ip) {
-    return ctx.answerCbQuery('❌ أضف السيرفر أولاً!', { show_alert: true });
-  }
-
-  const { ip, port, version = '1.21.124' } = servers[userId];
-  const protocol = PROTOCOL_MAP[version] || 860;
-
-  ctx.answerCbQuery('🚀 جاري التشغيل...');
-  ctx.reply(`🔗 الاتصال بـ:\n${ip}:${port}\nالإصدار: ${version}`);
-
-  try {
-    const client = createClient({
-      host: ip,
-      port: port,
-      username: 'IBR_Bot',
-      version: version,
-      offline: true,
-      connectTimeout: 15000,
-      protocolVersion: protocol,
-      skipPing: true
-    });
-
-    const clientKey = `${userId}_main`;
-    clients[clientKey] = client;
-
-    client.on('join', () => {
-      bot.telegram.sendMessage(userId, '🔥 دخل البوت بنجاح!').catch(() => {});
-    });
-
-    client.on('disconnect', (reason) => {
-      bot.telegram.sendMessage(userId, `❌ تم الفصل: ${reason}`).catch(() => {});
-      delete clients[clientKey];
-    });
-
-    client.on('error', (err) => {
-      let errorMsg = `❌ خطأ: ${err.message}`;
-
-      if (String(err.message).includes('Unsupported version')) {
-        const closest = getClosestVersion(version);
-        errorMsg += `\n\n💡 جرب:\n`;
-        errorMsg += `• الزر "🔧 تشغيل ذكي"\n`;
-        errorMsg += `• أو الإصدار ${closest}`;
-      }
-
-      bot.telegram.sendMessage(userId, errorMsg).catch(() => {});
-      delete clients[clientKey];
-    });
-
-  } catch (error) {
-    ctx.reply(`❌ خطأ: ${error.message}`);
-  }
-});
-
-// إضافة بوت إضافي
-bot.action('add_bot', async (ctx) => {
-  const userId = ctx.from.id;
-
-  if (!servers[userId] || !servers[userId].ip) {
-    return ctx.answerCbQuery('❌ أضف السيرفر أولاً!', { show_alert: true });
-  }
-
-  const { ip, port, version = '1.21.124' } = servers[userId];
-
-  ctx.answerCbQuery('➕ جاري إضافة بوت...');
-
-  try {
-    const botNames = ['IBR_Bot_2', 'IBR_Bot_3', 'IBR_Bot_4', 'IBR_Bot_5'];
-    const botName = botNames[Math.floor(Math.random() * botNames.length)];
-
-    const result = await smartConnect(ip, port, version, userId, botName);
-
-    if (result.success) {
-      const clientKey = `${userId}_${botName}`;
-      clients[clientKey] = result.client;
-
-      ctx.reply(`✅ ${botName} - ${result.message}`);
-
-      result.client.on('disconnect', () => {
-        bot.telegram.sendMessage(userId, `❌ ${botName} تم فصله`).catch(() => {});
+      client.on('disconnect', (reason) => {
+        removeActiveBot(userId);
         delete clients[clientKey];
       });
 
-    } else {
-      ctx.reply(`❌ فشل إضافة ${botName}: ${result.error}`);
-    }
+      client.on('error', (err) => {
+        let errorMsg = `❌ خطأ: ${err.message}\n💰 تم استرجاع 100 نقطة`;
+        
+        addPoints(userId, 100, 'refund_error');
+        removeActiveBot(userId);
+        
+        bot.telegram.sendMessage(userId, errorMsg).catch(() => {});
+        delete clients[clientKey];
+      });
 
+    } catch (error) {
+      addPoints(userId, 100, 'refund_catch');
+      removeActiveBot(userId);
+      ctx.reply(`❌ خطأ: ${error.message}\n💰 تم استرجاع 100 نقطة`);
+    }
   } catch (error) {
-    ctx.reply(`❌ خطأ في إضافة البوت: ${error.message}`);
+    console.log('❌ خطأ في run_bot_with_check:', error.message);
+    await safeAnswerCbQuery(ctx, '❌ حدث خطأ، يرجى المحاولة مرة أخرى', { show_alert: true });
   }
 });
 
-// إيقاف البوتات
-bot.action('stop_bot', (ctx) => {
-  const userId = ctx.from.id;
+// ============== [تشغيل ذكي] ==============
+async function smartConnect(ip, port, requestedVersion, userId, botName = 'IBR_Bot') {
+  try {
+    const versionsToTry = [];
+    const closestVersion = getClosestVersion(requestedVersion);
 
-  let stopped = 0;
-  Object.keys(clients).forEach(key => {
-    if (key.startsWith(userId + '_')) {
-      try {
-        clients[key].end();
-        stopped++;
-      } catch (err) {}
-      delete clients[key];
+    versionsToTry.push(requestedVersion);
+
+    if (requestedVersion !== closestVersion) {
+      versionsToTry.push(closestVersion);
     }
-  });
 
-  ctx.answerCbQuery(`🛑 تم إيقاف ${stopped} بوت`);
-  ctx.reply(`✅ تم إيقاف ${stopped} بوت`);
+    const commonVersions = ['1.21.124', '1.21.100', '1.21.80'];
+    commonVersions.forEach(v => {
+      if (!versionsToTry.includes(v) && PROTOCOL_MAP[v]) {
+        versionsToTry.push(v);
+      }
+    });
+
+    let lastError = null;
+
+    for (const version of versionsToTry) {
+      const protocol = PROTOCOL_MAP[version];
+      if (!protocol) continue;
+
+      try {
+        const client = createClient({
+          host: ip,
+          port: port,
+          username: botName,
+          version: version,
+          offline: true,
+          connectTimeout: 10000,
+          protocolVersion: protocol,
+          skipPing: false,
+          raknetBackoff: true
+        });
+
+        const connectionResult = await new Promise((resolve) => {
+          const timeout = setTimeout(() => {
+            try { client.end(); } catch (e) {}
+            resolve({ success: false, error: 'انتهت مهلة الاتصال' });
+          }, 10000);
+
+          client.once('join', () => {
+            clearTimeout(timeout);
+            resolve({ success: true, client });
+          });
+
+          client.once('error', (err) => {
+            clearTimeout(timeout);
+            try { client.end(); } catch (e) {}
+            resolve({ success: false, error: err.message });
+          });
+
+          client.once('disconnect', () => {
+            clearTimeout(timeout);
+            try { client.end(); } catch (e) {}
+            resolve({ success: false, error: 'انقطع الاتصال' });
+          });
+        });
+
+        if (connectionResult.success) {
+          return {
+            success: true,
+            client: connectionResult.client,
+            versionUsed: version,
+            protocolUsed: protocol,
+            requestedVersion,
+            message: version === requestedVersion ?
+              `✅ تم الاتصال بالإصدار ${version}` :
+              `✅ تم الاتصال بالإصدار ${version} (بديل عن ${requestedVersion})`
+          };
+        } else {
+          lastError = connectionResult.error;
+        }
+
+      } catch (error) {
+        lastError = error.message;
+        continue;
+      }
+    }
+
+    return {
+      success: false,
+      error: lastError || 'فشل جميع المحاولات',
+      requestedVersion
+    };
+
+  } catch (error) {
+    return {
+      success: false,
+      error: 'حدث خطأ داخلي',
+      requestedVersion
+    };
+  }
+}
+
+bot.action('run_smart_with_check', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    
+    const check = canStartBot(userId);
+    
+    if (!check.canStart) {
+      return safeAnswerCbQuery(ctx, check.reason, { show_alert: true });
+    }
+
+    if (!servers[userId] || !servers[userId].ip) {
+      return safeAnswerCbQuery(ctx, '❌ أضف السيرفر أولاً!', { show_alert: true });
+    }
+
+    const { ip, port, version = '1.21.124' } = servers[userId];
+
+    await safeAnswerCbQuery(ctx, '🤖 جاري التشغيل الذكي...');
+    
+    const deducted = deductPoints(userId, 100);
+    if (!deducted) {
+      return safeAnswerCbQuery(ctx, '❌ خطأ في خصم النقاط!', { show_alert: true });
+    }
+    
+    createActiveBot(userId, 1);
+
+    ctx.reply(`🔍 بدء الاتصال الذكي:\n${ip}:${port}\nالإصدار المطلوب: ${version}\n💰 تم خصم 100 نقطة`)
+      .catch(() => {});
+
+    setTimeout(async () => {
+      try {
+        const result = await smartConnect(ip, port, version, userId);
+
+        if (result.success) {
+          const clientKey = `${userId}_main`;
+          clients[clientKey] = result.client;
+
+          ctx.reply(`${result.message}\n⏰ المدة: 6 ساعات\n🏦 الرصيد الجديد: ${getUserPoints(userId).balance}`).catch(() => {});
+
+          result.client.on('join', () => {
+            bot.telegram.sendMessage(userId,
+              `🔥 *تم دخول البوت!*\n\n` +
+              `▫️ الإصدار المستخدم: ${result.versionUsed}\n` +
+              `▫️ البروتوكول: ${result.protocolUsed}\n` +
+              `▫️ الحالة: ${result.versionUsed === result.requestedVersion ? 'مباشر' : 'بديل'}\n` +
+              `⏰ المدة: 6 ساعات\n` +
+              `⚠️ البوت سيتوقف تلقائياً بعد 6 ساعات`,
+              { parse_mode: 'Markdown' }
+            ).catch(() => {});
+          });
+
+          result.client.on('disconnect', (reason) => {
+            removeActiveBot(userId);
+            delete clients[clientKey];
+          });
+
+          result.client.on('error', (err) => {
+            addPoints(userId, 100, 'refund_smart_error');
+            removeActiveBot(userId);
+            delete clients[clientKey];
+          });
+
+        } else {
+          addPoints(userId, 100, 'refund_smart_fail');
+          removeActiveBot(userId);
+          
+          ctx.reply(
+            `❌ فشل الاتصال\n\n` +
+            `خطأ: ${result.error}\n` +
+            `💰 تم استرجاع 100 نقطة`
+          ).catch(() => {});
+        }
+
+      } catch (error) {
+        console.error('🔥 خطأ في run_smart:', error.message);
+        addPoints(userId, 100, 'refund_smart_catch');
+        removeActiveBot(userId);
+      }
+    }, 100);
+  } catch (error) {
+    console.log('❌ خطأ في run_smart_with_check:', error.message);
+    await safeAnswerCbQuery(ctx, '❌ حدث خطأ، يرجى المحاولة مرة أخرى', { show_alert: true });
+  }
 });
 
-// حذف السيرفر
-bot.action('del_server', (ctx) => {
-  const userId = ctx.from.id;
+// ============== [أزرار البوت الأساسية] ==============
+bot.action(/ver_(.+)/, (ctx) => {
+  try {
+    const version = ctx.match[1];
+    const userId = ctx.from.id;
 
-  if (servers[userId]) {
-    delete servers[userId];
+    ctx.answerCbQuery(`✅ تم اختيار ${version}`);
+
+    servers[userId] = servers[userId] || {};
+    servers[userId].version = version;
     saveServers();
 
+    ctx.reply(`✅ الإصدار: ${version}\n\n📥 أرسل IP السيرفر وPort:\nمثال:\nplay.server.com:19132`);
+  } catch (error) {
+    console.log('❌ خطأ في اختيار الإصدار:', error.message);
+  }
+});
+
+bot.action('stop_bot', (ctx) => {
+  try {
+    const userId = ctx.from.id;
+
+    let stopped = 0;
     Object.keys(clients).forEach(key => {
       if (key.startsWith(userId + '_')) {
         try {
           clients[key].end();
+          stopped++;
         } catch (err) {}
         delete clients[key];
       }
     });
 
-    ctx.answerCbQuery('🗑️ تم الحذف');
-    ctx.reply('✅ تم حذف السيرفر وإيقاف البوتات');
-  } else {
-    ctx.answerCbQuery('❌ لا يوجد سيرفر');
-  }
-});
-
-// ============== [أوامر خاصة] ==============
-
-// اختبار الاتصال
-bot.command('test', async (ctx) => {
-  const userId = ctx.from.id;
-
-  if (!servers[userId] || !servers[userId].ip) {
-    return ctx.reply('❌ أضف السيرفر أولاً!');
-  }
-
-  const { ip, port } = servers[userId];
-
-  ctx.reply(`🔬 *بدء اختبار الاتصال:*\n${ip}:${port}`, { parse_mode: 'Markdown' });
-
-  const testVersions = ['1.21.130', '1.21.124', '1.21.100', '1.21.80', '1.20.80'];
-  let results = [];
-
-  for (const version of testVersions) {
-    const protocol = PROTOCOL_MAP[version];
-    if (!protocol) {
-      results.push(`❓ ${version} - غير معروف`);
-      continue;
-    }
-
-    try {
-      const testClient = createClient({
-        host: ip,
-        port: port,
-        username: 'Test_Bot',
-        version: version,
-        offline: true,
-        connectTimeout: 5000,
-        protocolVersion: protocol,
-        skipPing: true
-      });
-
-      const connected = await new Promise((resolve) => {
-        testClient.once('join', () => {
-          try { testClient.end(); } catch (e) {}
-          resolve(true);
-        });
-
-        testClient.once('error', () => {
-          try { testClient.end(); } catch (e) {}
-          resolve(false);
-        });
-
-        setTimeout(() => {
-          try { testClient.end(); } catch (e) {}
-          resolve(false);
-        }, 5000);
-      });
-
-      results.push(`${connected ? '✅' : '❌'} ${version} - ${connected ? 'ناجح' : 'فاشل'}`);
-
-    } catch (error) {
-      results.push(`💥 ${version} - خطأ`);
-    }
-  }
-
-  ctx.reply(
-    `📊 *نتائج الاختبار:*\n\n${results.join('\n')}\n\n` +
-    `💡 استخدم الإصدار الأول الناجح`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// تحديث الإصدارات (للمالك فقط)
-bot.command('update_versions', async (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  ctx.reply('🔄 جاري تحديث خريطة الإصدارات...');
-
-  try {
-    let newVersions = '';
-
-    for (let i = 131; i <= 140; i++) {
-      const version = `1.21.${i}`;
-      const protocolNum = 870 + (i - 130);
-
-      if (!PROTOCOL_MAP[version]) {
-        PROTOCOL_MAP[version] = protocolNum;
-        newVersions += `• ${version}: ${protocolNum}\n`;
-      }
-    }
-
-    if (newVersions) {
-      ctx.reply(
-        `✅ *تمت إضافة إصدارات جديدة:*\n\n${newVersions}\n` +
-        `📊 الإجمالي: ${Object.keys(PROTOCOL_MAP).length} إصدار\n\n` +
-        `🔄 أعد تشغيل البوت للتطبيق`,
-        { parse_mode: 'Markdown' }
-      );
-    } else {
-      ctx.reply('✅ خريطة الإصدارات محدثة بالفعل');
-    }
-
+    removeActiveBot(userId);
+    
+    ctx.answerCbQuery(`🛑 تم إيقاف ${stopped} بوت`);
+    ctx.reply(`✅ تم إيقاف ${stopped} بوت`);
   } catch (error) {
-    ctx.reply(`❌ خطأ: ${error.message}`);
+    console.log('❌ خطأ في stop_bot:', error.message);
   }
 });
 
-// تعيين إصدار سريع
-bot.command('set130', (ctx) => {
-  const userId = ctx.from.id;
+bot.action('del_server', (ctx) => {
+  try {
+    const userId = ctx.from.id;
 
-  if (!servers[userId] || !servers[userId].ip) {
-    return ctx.reply('❌ أضف السيرفر أولاً!');
+    if (servers[userId]) {
+      delete servers[userId];
+      saveServers();
+
+      Object.keys(clients).forEach(key => {
+        if (key.startsWith(userId + '_')) {
+          try {
+            clients[key].end();
+          } catch (err) {}
+          delete clients[key];
+        }
+      });
+
+      removeActiveBot(userId);
+      
+      ctx.answerCbQuery('🗑️ تم الحذف');
+      ctx.reply('✅ تم حذف السيرفر وإيقاف البوتات');
+    } else {
+      ctx.answerCbQuery('❌ لا يوجد سيرفر');
+    }
+  } catch (error) {
+    console.log('❌ خطأ في del_server:', error.message);
   }
-
-  servers[userId].version = '1.21.130';
-  saveServers();
-
-  ctx.reply(
-    `✅ تم تعيين الإصدار إلى 1.21.130\n\n` +
-    `🚀 *معلومات:*\n` +
-    `• البروتوكول: ${PROTOCOL_MAP['1.21.130'] || 870}\n` +
-    `• اضغط "🔧 تشغيل ذكي" للبدء\n\n` +
-    `⚠️ إذا لم يعمل، سيحاول البوت إصداراً بديلاً تلقائياً`,
-    { parse_mode: 'Markdown' }
-  );
 });
 
-bot.command('set124', (ctx) => {
-  const userId = ctx.from.id;
-
-  if (!servers[userId] || !servers[userId].ip) {
-    return ctx.reply('❌ أضف السيرفر أولاً!');
+// ============== [أوامر جديدة للنقاط] ==============
+bot.command('points', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    const userPoints = getUserPoints(userId);
+    const activeBot = checkActiveBot(userId);
+    
+    let message = `💰 *نقاطك*\n\n`;
+    message += `🏦 الرصيد الحالي: *${userPoints.balance} نقطة*\n`;
+    message += `📈 إجمالي ما ربحته: *${userPoints.totalEarned} نقطة*\n\n`;
+    
+    if (activeBot) {
+      message += `🤖 *بوت نشط*\n`;
+      message += `⏰ المتبقي: ${activeBot.remainingHours} ساعة\n`;
+      message += `⏱️ المدة: 6 ساعات\n\n`;
+    }
+    
+    message += `🎯 *تكلفة التشغيل:* 100 نقطة\n`;
+    message += `⏰ *مدة التشغيل:* 6 ساعات\n\n`;
+    message += `🔗 *للحصول على نقاط:*\n`;
+    message += `• تابع قناة البوت للحصول على الروابط\n`;
+    message += `• كل رابط يعطيك 100 نقطة\n`;
+    message += `• الروابط تتجدد كل 24 ساعة`;
+    
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.url('📢 قناة البوت للروابط', 'https://t.me/+c7sbwOViyhNmYzAy')],
+      [Markup.button.callback('🤖 تشغيل بوت جديد', 'start_bot_with_points')],
+      [Markup.button.callback('📊 إحصائيات مفصلة', 'detailed_stats')]
+    ]);
+    
+    ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...keyboard
+    });
+  } catch (error) {
+    console.log('❌ خطأ في أمر points:', error.message);
   }
-
-  servers[userId].version = '1.21.124';
-  saveServers();
-
-  ctx.reply('✅ تم تعيين الإصدار إلى 1.21.124 (مضمون)\nاضغط \"▶️ تشغيل البوت\"');
 });
 
-// الإحصائيات (قديم - يبقى كما هو)
-bot.command('stats', (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  const stats = `📊 *إحصائيات البوت:*\n` +
-    `👥 المستخدمين: ${users.length}\n` +
-    `🌐 السيرفرات النشطة: ${Object.keys(servers).length}\n` +
-    `🤖 البوتات النشطة: ${Object.keys(clients).length}\n` +
-    `📀 أحدث إصدار: 1.21.130`;
-
-  ctx.reply(stats, { parse_mode: 'Markdown' });
-});
-
-// البث (قديم - يبقى كما هو)
-bot.command('broadcast', async (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  const message = ctx.message.text.replace('/broadcast', '').trim();
-  if (!message) return ctx.reply('❌ أرسل الرسالة بعد الأمر');
-
-  ctx.reply(`📢 إرسال لـ ${users.length} مستخدم...`);
-
-  let sent = 0;
-  for (let user of users) {
-    try {
-      await bot.telegram.sendMessage(user, `📢 إشعار:\n\n${message}`);
-      sent++;
-    } catch (err) {}
+bot.command('bonus', async (ctx) => {
+  try {
+    ctx.reply(`🎁 *للحصول على نقاط مجانية*\n\n` +
+      `🔗 تابع قناة البوت للحصول على الروابط:\n` +
+      `https://t.me/+c7sbwOViyhNmYzAy\n\n` +
+      `💡 *كيفية الاستخدام:*\n` +
+      `1. احصل على رابط من القناة\n` +
+      `2. اضغط على الرابط\n` +
+      `3. احصل على 100 نقطة مجانية\n` +
+      `4. استخدم النقاط لتشغيل البوت لمدة 6 ساعات`, {
+      parse_mode: 'Markdown'
+    });
+  } catch (error) {
+    console.log('❌ خطأ في أمر bonus:', error.message);
   }
-
-  ctx.reply(`✅ تم الإرسال لـ ${sent}/${users.length} مستخدم`);
 });
 
-// معلومات المكتبة
-bot.command('libinfo', (ctx) => {
-  if (ctx.from.id !== ownerId) return;
-
-  const latestVersions = Object.keys(PROTOCOL_MAP)
-    .filter(v => v.startsWith('1.21.'))
-    .sort()
-    .reverse()
-    .slice(0, 10);
-
-  ctx.reply(
-    `📦 *معلومات المكتبة:*\n\n` +
-    `▫️ الإصدارات المدعومة: ${Object.keys(PROTOCOL_MAP).length}\n` +
-    `▫️ أحدث 10 إصدارات:\n${latestVersions.join('\n')}\n\n` +
-    `🔧 1.21.130 → بروتوكول: ${PROTOCOL_MAP['1.21.130'] || '?'}`,
-    { parse_mode: 'Markdown' }
-  );
+// ============== [إدارة الأخطاء] ==============
+bot.catch((err, ctx) => {
+  console.error('❌ خطأ غير معالج في البوت:', err.message);
+  console.error(err.stack);
+  try {
+    ctx.reply('❌ حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.');
+  } catch (e) {}
 });
 
 // ============== [تشغيل البوت] ==============
-process.once('SIGINT', () => gracefulShutdown('SIGINT'));
-process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
-
-console.log('🔍 التحقق من الإصدارات المدعومة...');
-
-const modernVersions = Object.keys(PROTOCOL_MAP)
-  .filter(v => v.startsWith('1.21.1'))
-  .sort()
-  .reverse();
-
-console.log(`📀 الإصدارات الحديثة المدعومة (1.21.1xx):`);
-modernVersions.slice(0, 15).forEach(v => {
-  console.log(`  ${v}: ${PROTOCOL_MAP[v]}`);
-});
-
-if (modernVersions.length === 0) {
-  console.log('⚠️ لا توجد إصدارات 1.21.1xx في الخريطة!');
-  console.log('💡 أضفها يدوياً إلى PROTOCOL_MAP');
-}
+console.log('🔍 بدء تشغيل البوت...');
+console.log('💰 نظام النقاط مفعل - كل بوت يكلف 100 نقطة لمدة 6 ساعات');
+console.log('🔗 الروابط: كل رابط يستخدم مرة واحدة فقط');
 
 bot.launch({
   dropPendingUpdates: true,
@@ -2017,24 +2334,22 @@ bot.launch({
 })
 .then(() => {
   console.log('🚀 البوت يعمل الآن!');
-  console.log('📀 الإصدارات المدعومة:', Object.keys(PROTOCOL_MAP).length);
-
-  const latest = Object.keys(PROTOCOL_MAP)
-    .filter(v => v.startsWith('1.21.1'))
-    .sort()
-    .reverse()[0];
-
-  console.log(`🎯 أحدث إصدار: ${latest} (بروتوكول: ${PROTOCOL_MAP[latest]})`);
+  console.log('🎯 المميزات المضافة:');
+  console.log('• نظام نقاط (100 نقطة للتشغيل)');
+  console.log('• 5 روابط مكافآت (كل رابط يستخدم مرة واحدة)');
+  console.log('• تشغيل لمدة 6 ساعات ثم توقف تلقائي');
+  console.log('• لوحة أدمن كاملة مع جميع المميزات');
+  console.log('• معالجة أخطاء محسنة');
+  
+  console.log('\n🔗 روابط المكافآت الجاهزة:');
+  Object.keys(DEFAULT_BONUS_LINKS).forEach(code => {
+    console.log(`  https://t.me/IBR_Atrenos_bot?start=${code}`);
+  });
 })
 .catch((err) => {
   console.error('❌ خطأ في تشغيل البوت:', err.message);
-
-  if (err.response?.error_code === 409) {
-    console.error('\n💡 *الحل:*');
-    console.error('1. اذهب إلى Railway Dashboard');
-    console.error('2. أوقف الخدمة (Pause Service)');
-    console.error('3. انتظر 30 ثانية');
-    console.error('4. أعد التشغيل (Resume Service)');
-  }
 });
 
+// تمكين إيقاف البوت بشكل أنيق
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
