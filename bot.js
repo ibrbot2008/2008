@@ -568,7 +568,8 @@ function buildVersionKeyboard(isOwnerUser, userId) {
   }
   
   const rows = [
-    [Markup.button.callback('✨NEW 1.21.131', 'ver_1.21.131')],
+    [Markup.button.callback('✨NEW 1.21.132 ', 'ver_1.21.130')],
+    [Markup.button.callback('✨NEW 1.21.131 ', 'ver_1.21.130')],
     [Markup.button.callback('🚀 1.21.130', 'ver_1.21.130')],
     [Markup.button.callback('✅ 1.21.124', 'ver_1.21.124')],
     [Markup.button.callback('1.21.123', 'ver_1.21.123')],
@@ -1905,7 +1906,6 @@ bot.on('text', async (ctx) => {
             `✅ تم حفظ السيرفر!\n` +
             `🌐 IP: ${ip}\n` +
             `🔌 Port: ${port}\n` +
-            `📀 الإصدار: ${version}\n` +
             `${pointsInfo}`,
             Markup.inlineKeyboard([
               [Markup.button.callback('▶️ تشغيل البوت (100 نقطة)', 'run_bot_with_check')],
@@ -2199,7 +2199,7 @@ bot.action(/ver_(.+)/, (ctx) => {
     servers[userId].version = version;
     saveServers();
 
-    ctx.reply(`✅ الإصدار: ${version}\n\n📥 أرسل IP السيرفر وPort:\nمثال:\nplay.server.com:19132`);
+    ctx.reply(`📥 أرسل IP السيرفر وPort:\nمثال:\nplay.server.com:19132`);
   } catch (error) {
     console.log('❌ خطأ في اختيار الإصدار:', error.message);
   }
